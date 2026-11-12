@@ -1,0 +1,126 @@
+"""Pydantic request and response schemas for ClassSniper API."""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.notifiers import is_valid_discord_user_id, is_valid_discord_webhook_url
+
+
+class BootstrapRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class RegisterInviteRequest(BaseModel):
+    invite_code: str = Field(min_length=4, max_length=64)
+    username: str = Field(min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128)
+
+
+class CreateWatchRequest(BaseModel):
+    roster: str = Field(min_length=3, max_length=10)
+    subject: str = Field(min_length=1, max_length=12)
+    catalog_nbr: str = Field(min_length=1, max_length=12)
+    class_nbr: Optional[int] = Field(default=None, ge=1, le=999999)
+    enroll_group_idx: Optional[int] = Field(default=None, ge=0, le=100)
+    component_filter: Optional[str] = Field(default=None, max_length=10)
+    mode: Literal["exact", "linked_group", "any_section"] = "exact"
+    trigger_on: Literal["open", "open_or_waitlist"] = "open"
+    priority: int = Field(default=1, ge=1, le=2)
+    auto_pause: bool = False
+    cooldown_sec: int = Field(default=60, ge=0, le=86400)
+
+
+class UpdateWatchRequest(BaseModel):
+    active: Optional[bool] = None
+    auto_pause: Optional[bool] = None
+    trigger_on: Optional[Literal["open", "open_or_waitlist"]] = None
+    priority: Optional[int] = Field(default=None, ge=1, le=2)
+    cooldown_sec: Optional[int] = Field(default=None, ge=0, le=86400)
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=10, max_length=512)
+    auth: str = Field(min_length=8, max_length=256)
+
+
+class PushSubscribeRequest(BaseModel):
+    endpoint: str = Field(min_length=10, max_length=2048)
+    keys: PushSubscriptionKeys
+    device_label: str = Field(default="Browser", min_length=1, max_length=80)
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: Optional[str] = None
+    id: Optional[int] = None
+
+
+class NotificationPreferencesRequest(BaseModel):
+    discord_user_id: Optional[str] = None
+    discord_ping_enabled: Optional[bool] = None
+    web_push_enabled: Optional[bool] = None
+    personal_webhook_url: Optional[str] = None
+
+    @field_validator("discord_user_id")
+    @classmethod
+    def check_discord_uid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if cleaned == "":
+            return ""
+        if not is_valid_discord_user_id(cleaned):
+            raise ValueError("Discord User ID must be 15-22 digits (copy from Discord Developer Mode)")
+        return cleaned
+
+    @field_validator("personal_webhook_url")
+    @classmethod
+    def check_personal_webhook(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if cleaned == "":
+            return ""
+        if not is_valid_discord_webhook_url(cleaned):
+            raise ValueError("Webhook URL must start with https://discord.com/api/webhooks/...")
+        return cleaned
+
+
+class TestNotifyRequest(BaseModel):
+    target: Literal["all", "web_push", "discord"] = "all"
+
+
+class CreateInviteRequest(BaseModel):
+    max_uses: int = Field(default=1, ge=1, le=50)
+    expires_hours: Optional[int] = Field(default=72, ge=1, le=24 * 90)
+    note: str = Field(default="", max_length=100)
+
+
+class UpdateAdminSettingsRequest(BaseModel):
+    discord_shared_webhook_url: Optional[str] = None
+    poll_max_rps: Optional[float] = Field(default=None, ge=0.2, le=3.0)
+
+    @field_validator("discord_shared_webhook_url")
+    @classmethod
+    def check_shared_webhook(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if cleaned == "":
+            return ""
+        if not is_valid_discord_webhook_url(cleaned):
+            raise ValueError("Shared Discord Webhook URL must start with https://discord.com/api/webhooks/...")
+        return cleaned
+
+
+class SyncCatalogRequest(BaseModel):
+    roster: Optional[str] = None
+    subject: Optional[str] = None

@@ -1,0 +1,19 @@
+services:
+  classsniper:
+    build:
+      context: .
+      target: prod
+    container_name: classsniper
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

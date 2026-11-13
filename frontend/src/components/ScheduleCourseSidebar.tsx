@@ -159,8 +159,14 @@ export function ScheduleCourseSidebar({
       <div className="space-y-2.5">
         {courses.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/40 p-5 text-center text-xs text-zinc-400">
-            No courses in this schedule yet. Use the quick search above or click{" "}
-            <span className="font-semibold text-emerald-300">+ Schedule</span> from Search Classes.
+            <p className="font-medium text-zinc-300">No courses in this schedule yet</p>
+            <p className="mt-1">
+              Add courses using Quick-Add above or{" "}
+              <span className="font-semibold text-sky-300">+ Schedule</span> in Search Classes.
+              Once added, use{" "}
+              <span className="font-semibold text-emerald-300">Auto-Generate</span> to find
+              conflict-free lecture, discussion &amp; lab combinations.
+            </p>
           </div>
         ) : (
           courses.map((course) => {

@@ -8,6 +8,7 @@ import {
   Download,
   Edit3,
   Footprints,
+  HelpCircle,
   Link2,
   Loader2,
   Plus,
@@ -16,6 +17,7 @@ import {
   Share2,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import { api } from "../api/client";
 import type {
@@ -67,8 +69,10 @@ export function SchedulerPage({
 
   // Auto-generator state
   const [showGenerator, setShowGenerator] = useState(false);
+  const [showGeneratorHelp, setShowGeneratorHelp] = useState(false);
   const [previewCandidate, setPreviewCandidate] =
     useState<GeneratedScheduleCandidate | null>(null);
+  const quickInputRef = useRef<HTMLInputElement | null>(null);
 
   // Schedule management UI
   const [showNewForm, setShowNewForm] = useState(false);
@@ -624,19 +628,49 @@ export function SchedulerPage({
 
           {/* Right Toolbar Actions */}
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={!active || active.courses.length === 0}
-              onClick={() => setShowGenerator((v) => !v)}
-              className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition disabled:opacity-40 ${
-                showGenerator
-                  ? "bg-emerald-400 text-zinc-950"
-                  : "border border-emerald-500/45 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-              }`}
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              Auto-Generate
-            </button>
+            <div className="inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!active || active.courses.length === 0) {
+                    setShowGeneratorHelp(true);
+                    quickInputRef.current?.focus();
+                    return;
+                  }
+                  setShowGenerator((v) => !v);
+                }}
+                title={
+                  !active || active.courses.length === 0
+                    ? "Add at least 1 course first to auto-generate section combinations"
+                    : "Find conflict-free section combinations across your courses"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-l-xl px-3 py-1.5 text-xs font-bold transition ${
+                  showGenerator
+                    ? "bg-emerald-400 text-zinc-950"
+                    : !active || active.courses.length === 0
+                      ? "border border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+                      : "border border-emerald-500/45 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                }`}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Auto-Generate
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowGeneratorHelp((v) => !v)}
+                title="How Auto-Generate works"
+                aria-label="How Auto-Generate works"
+                className={`inline-flex items-center justify-center rounded-r-xl border border-l-0 px-2 py-1.5 text-xs transition ${
+                  showGeneratorHelp
+                    ? "border-sky-400/60 bg-sky-500/20 text-sky-200"
+                    : showGenerator
+                      ? "border-emerald-400 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
+                      : "border-zinc-700 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                <HelpCircle className="h-3.5 w-3.5" />
+              </button>
+            </div>
 
             {closedOrWaitlistSelected.length > 0 && (
               <button
@@ -679,6 +713,44 @@ export function SchedulerPage({
             </button>
           </div>
         </div>
+
+        {/* How Auto-Generate Works Info Bubble */}
+        {showGeneratorHelp && (
+          <div className="mt-3 rounded-xl border border-sky-500/35 bg-sky-500/10 p-3 text-xs text-zinc-200">
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5 font-bold text-sky-200">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  How Auto-Generate Works
+                </div>
+                <p className="text-zinc-300">
+                  Auto-Generate automatically tests every valid Lecture, Discussion, and Lab combination across the courses you&apos;ve added, avoiding conflicts and ranking the best options for you.
+                </p>
+                <ol className="list-inside list-decimal space-y-0.5 text-[11px] text-zinc-300">
+                  <li>
+                    <strong>Add your courses first</strong> using Quick-Add below or{" "}
+                    <span className="font-semibold text-sky-200">+ Schedule</span> in Search (each course starts with a placeholder section until you generate or swap).
+                  </li>
+                  <li>
+                    <strong>Optional constraints:</strong> Drag on the calendar to add{" "}
+                    <strong>Busy Times</strong>, or click the <strong>Lock</strong> icon on any section you want to keep fixed.
+                  </li>
+                  <li>
+                    <strong>Click Auto-Generate</strong> to flip through ranked conflict-free plans (Compact, Latest Start, Fewest Closed, etc.) and apply the one you like.
+                  </li>
+                </ol>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowGeneratorHelp(false)}
+                className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                aria-label="Close help"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* New Schedule Form */}
         {showNewForm && (
@@ -895,6 +967,7 @@ export function SchedulerPage({
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
             <input
+              ref={quickInputRef}
               type="text"
               value={quickQuery}
               onChange={(e) => setQuickQuery(e.target.value)}

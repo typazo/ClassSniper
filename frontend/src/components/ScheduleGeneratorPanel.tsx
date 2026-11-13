@@ -87,8 +87,7 @@ export function ScheduleGeneratorPanel({
           <div>
             <h3 className="text-sm font-bold text-white">Auto-Schedule Generator</h3>
             <p className="text-[11px] text-zinc-400">
-              Respects pinned sections (<span className="text-amber-300">Lock</span>), Busy blocks, and enrollGroups · Runs locally in{" "}
-              {result.elapsedMs}ms
+              Picks conflict-free Lecture/Discussion/Lab sections across your added courses — honoring pinned (<span className="text-amber-300">Lock</span>) sections &amp; Busy blocks ({result.elapsedMs}ms)
             </p>
           </div>
         </div>

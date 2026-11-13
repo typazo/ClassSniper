@@ -12,6 +12,7 @@ from app.auth import (
     get_current_user,
     get_db,
     hash_password_async,
+    normalize_major_mode,
     set_session_cookie,
     verify_password_async,
     verify_session_token,
@@ -36,7 +37,7 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         else decode_completed_courses(user.get("completed_courses_json"))
     )
     raw_implied = user.get("include_implied_prereqs")
-    raw_show_cs = user.get("show_cs_features")
+    mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
     return {
         "id": user["id"],
         "username": user["username"],
@@ -48,7 +49,8 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "has_personal_webhook": bool((user.get("personal_webhook_url") or "").strip()),
         "completed_courses": completed,
         "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
-        "show_cs_features": True if raw_show_cs is None else bool(raw_show_cs),
+        "major_mode": mode,
+        "show_cs_features": show_cs,
     }
 
 
@@ -70,7 +72,8 @@ async def auth_status(
                 """
                 SELECT id, username, role, priority_tier, discord_user_id,
                        discord_ping_enabled, personal_webhook_url, web_push_enabled,
-                       completed_courses_json, include_implied_prereqs, show_cs_features
+                       completed_courses_json, include_implied_prereqs, show_cs_features,
+                       major_mode
                 FROM users
                 WHERE id = ?
                 """,
@@ -136,7 +139,8 @@ async def login(
         """
         SELECT id, username, password_hash, role, priority_tier, discord_user_id,
                discord_ping_enabled, personal_webhook_url, web_push_enabled,
-               completed_courses_json, include_implied_prereqs, show_cs_features
+               completed_courses_json, include_implied_prereqs, show_cs_features,
+               major_mode
         FROM users
         WHERE username = ?
         """,
@@ -227,10 +231,22 @@ async def update_user_preferences(
     user: dict[str, Any] = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> dict[str, Any]:
-    next_val = bool(body.show_cs_features)
+    if body.major_mode is not None:
+        next_mode, next_show_cs = normalize_major_mode(body.major_mode)
+    elif body.show_cs_features is not None:
+        next_mode, next_show_cs = normalize_major_mode(None, body.show_cs_features)
+    else:
+        next_mode, next_show_cs = normalize_major_mode(
+            user.get("major_mode"),
+            user.get("show_cs_features"),
+        )
     async with db.write_tx() as conn:
         await conn.execute(
-            "UPDATE users SET show_cs_features = ? WHERE id = ?",
-            (1 if next_val else 0, user["id"]),
+            "UPDATE users SET major_mode = ?, show_cs_features = ? WHERE id = ?",
+            (next_mode, 1 if next_show_cs else 0, user["id"]),
         )
-    return {"user": _serialize_user({**user, "show_cs_features": next_val})}
+    return {
+        "user": _serialize_user(
+            {**user, "major_mode": next_mode, "show_cs_features": next_show_cs}
+        )
+    }

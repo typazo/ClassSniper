@@ -92,6 +92,10 @@ async def search_courses(
     include_2000_te: bool = Query(default=True),
     include_research_te: bool = Query(default=True),
     curriculum: Literal["current", "pre2024"] = Query(default="current"),
+    ilr_codes: str = Query(default="", max_length=200),
+    ilr_match: Literal["any", "all"] = Query(default="any"),
+    ilr_multi_only: bool = Query(default=False),
+    include_ilr: bool = Query(default=False),
     only_eligible: bool = Query(default=False),
     include_implied_prereqs: Optional[bool] = Query(default=None),
     ithaca_or_virtual: bool = Query(default=True),
@@ -105,6 +109,14 @@ async def search_courses(
         single = subject.strip().upper()
         if single not in parsed_subjects:
             parsed_subjects.insert(0, single)
+
+    parsed_ilr_codes = [c.strip().upper() for c in ilr_codes.split(",") if c.strip()]
+    effective_include_ilr = (
+        include_ilr
+        or bool(parsed_ilr_codes)
+        or ilr_multi_only
+        or user.get("major_mode") == "ilr"
+    )
 
     completed_courses = list(user.get("completed_courses") or [])
     effective_implied = (
@@ -123,6 +135,10 @@ async def search_courses(
         include_2000_te=include_2000_te,
         include_research_te=include_research_te,
         curriculum=curriculum,
+        ilr_codes=parsed_ilr_codes,
+        ilr_match=ilr_match,
+        ilr_multi_only=ilr_multi_only,
+        include_ilr=effective_include_ilr,
         completed_courses=completed_courses,
         only_eligible=only_eligible,
         include_implied_prereqs=effective_implied,
@@ -135,6 +151,22 @@ async def search_courses(
         "courses": result["courses"],
         "meta": result["meta"],
     }
+
+
+@router.get("/ilr/summary")
+async def get_ilr_summary(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    ithaca_or_virtual: bool = Query(default=True),
+    sync_priority: bool = Query(default=False),
+    _: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    return await catalog.get_ilr_summary(
+        target_roster,
+        ithaca_or_virtual=ithaca_or_virtual,
+        sync_priority=sync_priority,
+    )
 
 
 @router.post("/courses/refresh-subjects")
@@ -179,7 +211,8 @@ async def get_course_detail(
     roster: str,
     subject: str,
     catalog_nbr: str,
-    _: dict[str, Any] = Depends(get_current_user),
+    include_ilr: bool = Query(default=False),
+    user: dict[str, Any] = Depends(get_current_user),
     db: Database = Depends(get_db),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
@@ -193,7 +226,7 @@ async def get_course_detail(
                crse_id, acad_career, acad_group, catalog_prereq, catalog_coreq,
                catalog_forbidden_overlaps, catalog_num, units_min, units_max,
                has_letter_grade, crosslists_json, components_json,
-               enroll_groups_json, updated_at
+               crse_attrs_json, enroll_groups_json, updated_at
         FROM courses_meta
         WHERE roster = ? AND subject = ? AND catalog_nbr = ?
         """,
@@ -222,6 +255,11 @@ async def get_course_detail(
     course["enroll_groups"] = orjson.loads(course.pop("enroll_groups_json"))
     course["sections"] = sections
     course["external_links"] = build_external_links(roster_u, subject_u, catalog_nbr)
+    if include_ilr or user.get("major_mode") == "ilr":
+        ilr_index = await catalog.get_ilr_requirements_index(roster_u)
+        elig = ilr_index.get(subject_u, catalog_nbr)
+        course["ilr_eligibility"] = elig.to_dict() if elig is not None else None
+    course.pop("crse_attrs_json", None)
     return {"course": course}
 
 
@@ -316,9 +354,16 @@ async def get_user_prereq_options(
     roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=30, ge=1, le=100),
-    _: dict[str, Any] = Depends(get_current_user),
+    mode: Optional[Literal["cs", "ilr", "general"]] = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
     target_roster = (roster or await catalog.get_default_roster_slug()).upper()
-    options = await catalog.get_prereq_course_options(target_roster, query=q, limit=limit)
+    effective_mode = mode or ("ilr" if user.get("major_mode") == "ilr" else "cs")
+    options = await catalog.get_prereq_course_options(
+        target_roster,
+        query=q,
+        limit=limit,
+        mode=effective_mode,
+    )
     return {"roster": target_roster, "options": options}

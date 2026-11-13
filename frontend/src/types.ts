@@ -1,3 +1,6 @@
+export type MajorMode = "none" | "cs" | "ilr";
+export type IlrMatchMode = "any" | "all";
+
 export interface User {
   id: number;
   username: string;
@@ -9,6 +12,7 @@ export interface User {
   has_personal_webhook: boolean;
   completed_courses: string[];
   include_implied_prereqs: boolean;
+  major_mode: MajorMode;
   show_cs_features: boolean;
 }
 
@@ -105,10 +109,71 @@ export interface CourseSummary {
   crosslists?: string[];
   components?: string[];
   cs_eligibility?: CourseCSEligibility;
+  ilr_eligibility?: CourseIlrEligibility | null;
   hidden_other_location_count?: number;
   hidden_other_locations?: string[];
   subject_synced_at?: string | null;
   status_is_stale?: boolean;
+}
+
+export interface CourseIlrBadge {
+  code: string;
+  label: string;
+  short_label: string;
+  group: "main_elective" | "distribution" | "core" | "credit_pool";
+  rule_summary: string;
+  tone: string;
+  is_main_elective: boolean;
+}
+
+export interface CourseIlrEligibility {
+  qualifies_any: boolean;
+  codes: string[];
+  main_electives: string[];
+  distributions: string[];
+  credit_pools: string[];
+  is_main_elective: boolean;
+  is_ilr_core: boolean;
+  requirement_count: number;
+  also_fits_codes: string[];
+  badges: CourseIlrBadge[];
+  warnings: string[];
+  ug_crosslist_hints: string[];
+}
+
+export interface IlrBucketCounts {
+  total: number;
+  open: number;
+  waitlist: number;
+  closed: number;
+  stale: number;
+}
+
+export interface IlrRequirementSummary extends CourseIlrBadge, IlrBucketCounts {
+  requires_three_credits: boolean;
+}
+
+export interface IlrSummaryResponse {
+  roster: string;
+  ithaca_or_virtual: boolean;
+  requirements: IlrRequirementSummary[];
+  presets: {
+    all_il: IlrBucketCounts;
+    main_three: IlrBucketCounts;
+    ilr_core: IlrBucketCounts;
+    multi_req: IlrBucketCounts;
+  };
+  curriculum_url: string;
+  filtered_out_location_count: number;
+  queued_subjects: string[];
+  coverage: {
+    synced_subjects: number;
+    total_subjects: number;
+    ilr_synced: number;
+    ilr_total: number;
+    refreshing_subjects: string[];
+    warmup_active: boolean;
+  };
 }
 
 export interface SearchCoursesMeta {

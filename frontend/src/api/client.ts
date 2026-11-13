@@ -7,7 +7,10 @@ import type {
   CourseSummary,
   CSCurriculumMode,
   CSRequirementMode,
+  IlrMatchMode,
+  IlrSummaryResponse,
   InviteItem,
+  MajorMode,
   MetricsResponse,
   NotifyPreferences,
   PrereqCourseOption,
@@ -76,7 +79,7 @@ export const api = {
       body: JSON.stringify({ invite_code, username, password }),
     }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
-  updateUserPreferences: (patch: { show_cs_features: boolean }) =>
+  updateUserPreferences: (patch: { major_mode?: MajorMode; show_cs_features?: boolean }) =>
     request<{ user: User }>("/api/auth/preferences", {
       method: "PUT",
       body: JSON.stringify(patch),
@@ -97,6 +100,10 @@ export const api = {
       include_2000_te?: boolean;
       include_research_te?: boolean;
       curriculum?: CSCurriculumMode;
+      ilr_codes?: string[];
+      ilr_match?: IlrMatchMode;
+      ilr_multi_only?: boolean;
+      include_ilr?: boolean;
       only_eligible?: boolean;
       include_implied_prereqs?: boolean;
       ithaca_or_virtual?: boolean;
@@ -119,6 +126,16 @@ export const api = {
       params.set("include_research_te", String(options.include_research_te));
     }
     if (options?.curriculum) params.set("curriculum", options.curriculum);
+    if (options?.ilr_codes && options.ilr_codes.length > 0) {
+      params.set("ilr_codes", options.ilr_codes.join(","));
+    }
+    if (options?.ilr_match) params.set("ilr_match", options.ilr_match);
+    if (options?.ilr_multi_only !== undefined) {
+      params.set("ilr_multi_only", String(options.ilr_multi_only));
+    }
+    if (options?.include_ilr !== undefined) {
+      params.set("include_ilr", String(options.include_ilr));
+    }
     if (options?.only_eligible !== undefined) {
       params.set("only_eligible", String(options.only_eligible));
     }
@@ -138,6 +155,14 @@ export const api = {
   },
   getCatalogStatus: (roster: string) =>
     request<CatalogStatus>(`/api/catalog/status?roster=${encodeURIComponent(roster)}`),
+  getIlrSummary: (roster: string, ithacaOrVirtual = true, syncPriority = false) => {
+    const params = new URLSearchParams({
+      roster,
+      ithaca_or_virtual: String(ithacaOrVirtual),
+      sync_priority: String(syncPriority),
+    });
+    return request<IlrSummaryResponse>(`/api/ilr/summary?${params.toString()}`);
+  },
   refreshSubjects: (roster: string, subjects: string[]) =>
     request<{ roster: string; queued: string[] }>("/api/courses/refresh-subjects", {
       method: "POST",
@@ -169,8 +194,9 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
-  getPrereqOptions: (roster: string, q = "", limit = 30) => {
+  getPrereqOptions: (roster: string, q = "", limit = 30, mode?: MajorMode | "general") => {
     const params = new URLSearchParams({ roster, q, limit: String(limit) });
+    if (mode) params.set("mode", mode === "none" ? "general" : mode);
     return request<{ roster: string; options: PrereqCourseOption[] }>(
       `/api/user/prereqs/options?${params.toString()}`
     );

@@ -20,6 +20,11 @@ from app.services.cs_requirements import (
     CourseEligibility,
     CSRequirementsIndex,
 )
+from app.services.ilr_requirements import (
+    ILRRequirementsIndex,
+    PRIORITY_ILR_PREREQ_SUBJECTS,
+    PRIORITY_ILR_SUBJECTS,
+)
 from app.services.gate import PRIORITY_SEARCH, PRIORITY_WARMUP, CornellRequestGate
 from app.services.insights import build_external_links
 from app.services.sse import SSEHub
@@ -91,6 +96,7 @@ class CatalogSyncService:
         self._bg_sync_lock = asyncio.Lock()
         self._catalog_generation: dict[str, int] = {}
         self._cs_index_cache: dict[str, tuple[int, CSRequirementsIndex]] = {}
+        self._ilr_index_cache: dict[str, tuple[int, ILRRequirementsIndex]] = {}
 
         self._refresh_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=200)
         self._refresh_pending: set[tuple[str, str]] = set()
@@ -343,6 +349,7 @@ class CatalogSyncService:
 
         self._catalog_generation[roster_u] = self._catalog_generation.get(roster_u, 0) + 1
         self._cs_index_cache.pop(roster_u, None)
+        self._ilr_index_cache.pop(roster_u, None)
 
     async def update_section_statuses(
         self,
@@ -672,6 +679,148 @@ class CatalogSyncService:
         age_sec = (datetime.now(timezone.utc) - best_dt).total_seconds()
         return age_sec <= STATUS_FRESHNESS_SEC, best_dt.isoformat()
 
+    async def get_ilr_requirements_index(self, roster: str) -> ILRRequirementsIndex:
+        """Build or return cached ILRRequirementsIndex over all cached courses for a roster."""
+        roster_u = roster.upper()
+        gen = self._catalog_generation.get(roster_u, 0)
+        cached = self._ilr_index_cache.get(roster_u)
+        if cached is not None and cached[0] == gen:
+            return cached[1]
+
+        rows = await self.db.fetch_all(
+            """
+            SELECT subject, catalog_nbr, acad_career,
+                   units_min, units_max, has_letter_grade,
+                   crosslists_json, crse_attrs_json
+            FROM courses_meta
+            WHERE roster = ?
+            """,
+            (roster_u,),
+        )
+        index = ILRRequirementsIndex(rows)
+        self._ilr_index_cache[roster_u] = (gen, index)
+        return index
+
+    async def get_ilr_summary(
+        self,
+        roster: str,
+        ithaca_or_virtual: bool = True,
+        sync_priority: bool = False,
+        auto_warmup_unsynced: bool = True,
+    ) -> dict[str, Any]:
+        """Compute live ILR requirement availability counts for a roster."""
+        roster_u = roster.upper()
+        ilr_index = await self.get_ilr_requirements_index(roster_u)
+
+        course_rows = await self.db.fetch_all(
+            """
+            SELECT subject, catalog_nbr
+            FROM courses_meta
+            WHERE roster = ?
+            """,
+            (roster_u,),
+        )
+
+        # Keep only courses with at least one ILR requirement code / core tag.
+        ilr_courses: set[tuple[str, str]] = set()
+        ilr_subjects: set[str] = set()
+        for row in course_rows:
+            su = str(row["subject"]).upper()
+            nbr = str(row["catalog_nbr"])
+            elig = ilr_index.get(su, nbr)
+            if elig is not None and elig.codes:
+                ilr_courses.add((su, nbr))
+                ilr_subjects.add(su)
+
+        freshness_by_subj: dict[str, bool] = {}
+        for su in ilr_subjects:
+            is_fresh, _ = await self._get_subject_freshness(roster_u, su)
+            freshness_by_subj[su] = is_fresh
+
+        sec_by_course: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        if ilr_courses:
+            sec_rows = await self.db.fetch_all(
+                """
+                SELECT subject, catalog_nbr, open_status, campus, location, instruction_mode
+                FROM roster_sections
+                WHERE roster = ?
+                """,
+                (roster_u,),
+            )
+            for sec in sec_rows:
+                key = (str(sec["subject"]).upper(), str(sec["catalog_nbr"]))
+                if key in ilr_courses:
+                    sec_by_course.setdefault(key, []).append(sec)
+
+        course_status_map: dict[str, tuple[str, bool]] = {}
+        filtered_out_location_count = 0
+        for su, nbr in ilr_courses:
+            elig = ilr_index.get(su, nbr)
+            if elig is None:
+                continue
+            all_secs = sec_by_course.get((su, nbr), [])
+            if ithaca_or_virtual and all_secs:
+                active_secs = [
+                    s
+                    for s in all_secs
+                    if is_ithaca_or_virtual_section(
+                        campus=str(s.get("campus") or ""),
+                        location=str(s.get("location") or ""),
+                        instruction_mode=str(s.get("instruction_mode") or ""),
+                    )
+                ]
+                if not active_secs:
+                    filtered_out_location_count += 1
+                    continue
+            else:
+                active_secs = all_secs
+
+            open_cnt = sum(1 for s in active_secs if s.get("open_status") == "O")
+            wait_cnt = sum(1 for s in active_secs if s.get("open_status") == "W")
+            status = "open" if open_cnt > 0 else ("waitlist" if wait_cnt > 0 else "closed")
+            course_status_map[elig.course_code] = (status, freshness_by_subj.get(su, False))
+
+        summary = ilr_index.build_summary(course_status_map)
+        coverage = await self.get_catalog_status(roster_u)
+
+        subj_rows = await self.db.fetch_all(
+            "SELECT value, synced_at FROM subjects WHERE roster = ?",
+            (roster_u,),
+        )
+        synced_lookup = {str(r["value"]).upper(): r.get("synced_at") for r in subj_rows}
+        ilr_total = sum(1 for s in PRIORITY_ILR_SUBJECTS if s in synced_lookup)
+        ilr_synced = sum(1 for s in PRIORITY_ILR_SUBJECTS if synced_lookup.get(s))
+
+        queued_subjects: list[str] = []
+        if sync_priority or auto_warmup_unsynced:
+            to_queue: list[str] = []
+            for s in PRIORITY_ILR_SUBJECTS:
+                if s not in synced_lookup:
+                    continue
+                if sync_priority:
+                    if await self.is_subject_stale(roster_u, s):
+                        to_queue.append(s)
+                elif not synced_lookup.get(s):
+                    to_queue.append(s)
+            if to_queue:
+                queued_subjects = self.queue_visible_refresh(roster_u, to_queue)
+
+        return {
+            "roster": roster_u,
+            "ithaca_or_virtual": ithaca_or_virtual,
+            **summary,
+            "filtered_out_location_count": filtered_out_location_count,
+            "queued_subjects": queued_subjects,
+            "coverage": {
+                "synced_subjects": coverage["synced_subjects"],
+                "total_subjects": coverage["total_subjects"],
+                "ilr_synced": ilr_synced,
+                "ilr_total": ilr_total,
+                "refreshing_subjects": coverage["refreshing_subjects"],
+                "warmup_active": coverage["warmup_active"],
+            },
+        }
+
     async def get_cs_requirements_index(self, roster: str) -> CSRequirementsIndex:
         """Build or return cached CSRequirementsIndex over all cached courses for a roster."""
         roster_u = roster.upper()
@@ -725,9 +874,30 @@ class CatalogSyncService:
         cs_index: CSRequirementsIndex,
         cs_requirement: str,
         has_query: bool,
+        ilr_index: Optional[ILRRequirementsIndex] = None,
+        ilr_filter_active: bool = False,
+        sec_by_course: Optional[dict[tuple[str, str], list[dict[str, Any]]]] = None,
     ) -> list[dict[str, Any]]:
         if has_query:
             return rows
+
+        if ilr_filter_active and ilr_index is not None:
+            def ilr_sort_key(row: dict[str, Any]) -> tuple[int, int, int, int, int, str, int, str]:
+                subj = str(row["subject"]).upper()
+                nbr = str(row["catalog_nbr"])
+                cat_num = int(row.get("catalog_num") or 0)
+                elig = ilr_index.get(subj, nbr)
+                has_warnings = 1 if (elig and elig.warnings) else 0
+                not_ug = 0 if (elig and elig.acad_career == "UG") else 1
+                secs = (sec_by_course or {}).get((subj, nbr), [])
+                open_cnt = sum(1 for s in secs if s.get("open_status") == "O")
+                wait_cnt = sum(1 for s in secs if s.get("open_status") == "W")
+                avail_rank = 0 if open_cnt > 0 else (1 if wait_cnt > 0 else 2)
+                req_cnt = elig.requirement_count if elig else 0
+                main_cnt = len(elig.main_electives) if elig else 0
+                return (has_warnings, not_ug, avail_rank, -req_cnt, -main_cnt, subj, cat_num, nbr)
+
+            return sorted(rows, key=ilr_sort_key)
 
         def sort_key(row: dict[str, Any]) -> tuple[int, str, int, str]:
             subj = str(row["subject"])
@@ -829,6 +999,10 @@ class CatalogSyncService:
         include_2000_te: bool = True,
         include_research_te: bool = True,
         curriculum: str = "current",
+        ilr_codes: Optional[list[str]] = None,
+        ilr_match: str = "any",
+        ilr_multi_only: bool = False,
+        include_ilr: bool = False,
         completed_courses: Optional[list[str]] = None,
         only_eligible: bool = False,
         include_implied_prereqs: bool = True,
@@ -836,7 +1010,7 @@ class CatalogSyncService:
         refresh_stale: bool = True,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """Instant local FTS5 + CS eligibility search with polite lazy SSE status refresh."""
+        """Instant local FTS5 + CS/ILR eligibility search with polite lazy SSE status refresh."""
         roster_u = roster.upper()
         subject_list: list[str] = []
         seen_subjs: set[str] = set()
@@ -849,6 +1023,9 @@ class CatalogSyncService:
         query_clean = normalize_search_query(query)
         req_mode = cs_requirement.strip().lower()
         curriculum_mode = "pre2024" if curriculum == "pre2024" else "current"
+        ilr_filter_list = [c.strip().upper() for c in (ilr_codes or []) if c.strip()]
+        ilr_match_mode = "all" if str(ilr_match).strip().lower() == "all" else "any"
+        has_ilr_filter = bool(ilr_filter_list or ilr_multi_only)
 
         # Hydrate up to INLINE_UNCACHED_HYDRATE_CAP never-synced subjects that are explicitly targeted
         targets_to_check: list[str] = list(subject_list)
@@ -902,7 +1079,7 @@ class CatalogSyncService:
             effective_level_min = 3000
 
         fts_expr = build_fts_query(query_clean)
-        sql_limit = 4500 if (req_mode or only_eligible or ithaca_or_virtual) else max(limit, 200)
+        sql_limit = 8000 if (req_mode or only_eligible or ithaca_or_virtual or has_ilr_filter) else max(limit, 200)
 
         where_extra: list[str] = []
         extra_params: list[Any] = []
@@ -1008,6 +1185,22 @@ class CatalogSyncService:
                 )
             ]
 
+        ilr_index: Optional[ILRRequirementsIndex] = None
+        if include_ilr or has_ilr_filter:
+            ilr_index = await self.get_ilr_requirements_index(roster_u)
+            if has_ilr_filter:
+                courses = [
+                    c
+                    for c in courses
+                    if (ilr_elig := ilr_index.get(c["subject"], c["catalog_nbr"])) is not None
+                    and ilr_index.matches_filter(
+                        ilr_elig,
+                        ilr_filter_list,
+                        match_mode=ilr_match_mode,
+                        ilr_multi_only=ilr_multi_only,
+                    )
+                ]
+
         prereq_by_course: dict[tuple[str, str], dict[str, Any]] = {
             (c["subject"].upper(), str(c["catalog_nbr"]).upper()): cs_index.evaluate_course_prereqs(
                 c["subject"],
@@ -1069,6 +1262,9 @@ class CatalogSyncService:
             cs_index=cs_index,
             cs_requirement=req_mode,
             has_query=bool(fts_expr),
+            ilr_index=ilr_index,
+            ilr_filter_active=has_ilr_filter,
+            sec_by_course=sec_by_course,
         )
         total_matched = len(courses)
         courses = courses[:limit]
@@ -1089,6 +1285,13 @@ class CatalogSyncService:
             freshness_by_subj[su] = (is_fresh, eff_iso)
             if not is_fresh:
                 stale_visible_subjects.append(su)
+
+        active_ilr_set: set[str] = set()
+        for raw_code in ilr_filter_list:
+            if raw_code == "MAIN_3":
+                active_ilr_set.update(("ICL-IL", "LH-IL", "QP-IL"))
+            elif raw_code != "ANY_IL":
+                active_ilr_set.add(raw_code)
 
         for c in courses:
             su = str(c["subject"]).upper()
@@ -1111,6 +1314,13 @@ class CatalogSyncService:
                 **cs_index.get(su, nbr).to_dict(),
                 **prereq_eval,
             }
+            if ilr_index is not None:
+                ilr_elig = ilr_index.get(su, nbr)
+                c["ilr_eligibility"] = (
+                    ilr_elig.to_dict(active_filter_codes=active_ilr_set)
+                    if ilr_elig is not None
+                    else None
+                )
             c["subject_synced_at"] = eff_iso
             c["status_is_stale"] = not is_fresh
 
@@ -1148,10 +1358,12 @@ class CatalogSyncService:
         roster: str,
         query: str = "",
         limit: int = 30,
+        mode: str = "cs",
     ) -> list[dict[str, Any]]:
         """Query local cached courses_meta for prerequisite autocomplete with zero Cornell API calls."""
         roster_u = roster.upper()
         query_clean = normalize_search_query(query)
+        mode_norm = str(mode or "cs").strip().lower()
         rows: list[dict[str, Any]] = []
         seen_keys: set[tuple[str, str]] = set()
 
@@ -1173,17 +1385,23 @@ class CatalogSyncService:
                         return
 
         if not query_clean:
+            default_subjects = (
+                PRIORITY_ILR_PREREQ_SUBJECTS
+                if mode_norm == "ilr"
+                else ("CS", "MATH", "ORIE", "ECE", "INFO", "STSCI", "ENGRD", "BTRY")
+            )
+            subj_qmarks = ", ".join("?" for _ in default_subjects)
             default_rows = await self.db.fetch_all(
-                """
+                f"""
                 SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
                 FROM courses_meta
                 WHERE roster = ?
-                  AND subject IN ('CS', 'MATH', 'ORIE', 'ECE', 'INFO', 'STSCI', 'ENGRD', 'BTRY')
+                  AND subject IN ({subj_qmarks})
                   AND catalog_num BETWEEN 1000 AND 4999
                 ORDER BY subject, catalog_num, catalog_nbr
                 LIMIT ?
                 """,
-                (roster_u, limit),
+                (roster_u, *default_subjects, limit),
             )
             _append_rows(default_rows)
             if len(rows) < limit:

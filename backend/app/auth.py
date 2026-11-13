@@ -106,6 +106,21 @@ def get_db(request: Request) -> Database:
     return request.app.state.db
 
 
+VALID_MAJOR_MODES = ("none", "cs", "ilr")
+
+
+def normalize_major_mode(
+    major_mode: Any,
+    show_cs_features: Any = True,
+) -> tuple[str, bool]:
+    """Normalize user major_mode ('none' | 'cs' | 'ilr') and derive show_cs_features."""
+    mode = str(major_mode or "").strip().lower()
+    if mode not in VALID_MAJOR_MODES:
+        show_cs = True if show_cs_features is None else bool(show_cs_features)
+        mode = "cs" if show_cs else "none"
+    return mode, (mode == "cs")
+
+
 async def get_current_user(
     request: Request,
     db: Database = Depends(get_db),
@@ -121,7 +136,8 @@ async def get_current_user(
         """
         SELECT id, username, role, priority_tier, discord_user_id,
                discord_ping_enabled, personal_webhook_url, web_push_enabled,
-               completed_courses_json, include_implied_prereqs, show_cs_features, created_at
+               completed_courses_json, include_implied_prereqs, show_cs_features,
+               major_mode, created_at
         FROM users
         WHERE id = ?
         """,
@@ -130,12 +146,13 @@ async def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists")
     raw_implied = user.get("include_implied_prereqs")
-    raw_show_cs = user.get("show_cs_features")
+    mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
     return {
         **user,
         "completed_courses": decode_completed_courses(user.get("completed_courses_json")),
         "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
-        "show_cs_features": True if raw_show_cs is None else bool(raw_show_cs),
+        "major_mode": mode,
+        "show_cs_features": show_cs,
     }
 
 

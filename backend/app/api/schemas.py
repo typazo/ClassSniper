@@ -148,4 +148,5 @@ class CompletedPrereqsRequest(BaseModel):
 
 
 class UserPreferencesRequest(BaseModel):
-    show_cs_features: bool
+    major_mode: Optional[Literal["none", "cs", "ilr"]] = None
+    show_cs_features: Optional[bool] = None

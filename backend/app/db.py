@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
     completed_courses_json TEXT NOT NULL DEFAULT '[]',
     include_implied_prereqs INTEGER NOT NULL DEFAULT 1,
     show_cs_features INTEGER NOT NULL DEFAULT 1,
+    major_mode TEXT NOT NULL DEFAULT 'cs',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -227,6 +228,7 @@ _USERS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("completed_courses_json", "TEXT NOT NULL DEFAULT '[]'"),
     ("include_implied_prereqs", "INTEGER NOT NULL DEFAULT 1"),
     ("show_cs_features", "INTEGER NOT NULL DEFAULT 1"),
+    ("major_mode", "TEXT NOT NULL DEFAULT 'cs'"),
 )
 
 
@@ -268,7 +270,23 @@ class Database:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
+        has_major_mode = bool(
+            await self.fetch_one(
+                "SELECT 1 AS ok FROM pragma_table_info('users') WHERE name = 'major_mode'"
+            )
+        )
         await self._ensure_columns("users", _USERS_MIGRATIONS)
+        if not has_major_mode:
+            async with self.write_tx() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET major_mode = CASE
+                        WHEN COALESCE(show_cs_features, 1) = 1 THEN 'cs'
+                        ELSE 'none'
+                    END
+                    """
+                )
         await self._migrate_courses_meta()
         await self._migrate_roster_sections()
         await self._ensure_columns("watches", _WATCHES_MIGRATIONS)

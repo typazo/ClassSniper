@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
-  EyeOff,
   GraduationCap,
   ListChecks,
   Loader2,
@@ -25,6 +24,9 @@ import type {
   CourseSummary,
   CSCurriculumMode,
   CSRequirementMode,
+  IlrMatchMode,
+  IlrSummaryResponse,
+  MajorMode,
   Roster,
   SearchCoursesMeta,
   Subject,
@@ -32,6 +34,7 @@ import type {
 } from "../types";
 import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
 import { CourseInsightsPanel } from "./CourseInsightsPanel";
+import { IlrDistributionExplorer, ilrToneClasses } from "./IlrDistributionExplorer";
 import { MultiSubjectSelect } from "./MultiSubjectSelect";
 import { StatusBadge } from "./StatusBadge";
 import {
@@ -116,10 +119,20 @@ interface SearchOverride {
   include2000TE?: boolean;
   includeResearchTE?: boolean;
   curriculum?: CSCurriculumMode;
+  ilrCodes?: string[];
+  ilrMatch?: IlrMatchMode;
+  ilrMultiOnly?: boolean;
   onlyEligible?: boolean;
   ithacaOrVirtual?: boolean;
-  showCsFeatures?: boolean;
+  majorMode?: MajorMode;
   silent?: boolean;
+}
+
+function resolveUserMajorMode(u: User): MajorMode {
+  if (u.major_mode === "none" || u.major_mode === "cs" || u.major_mode === "ilr") {
+    return u.major_mode;
+  }
+  return u.show_cs_features === false ? "none" : "cs";
 }
 
 export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchCreated }: Props) {
@@ -129,13 +142,21 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
   const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
   const [query, setQuery] = useState("");
 
-  // CS Major Requirement Filters
-  const [showCsFeatures, setShowCsFeatures] = useState<boolean>(user.show_cs_features ?? true);
+  // Persisted Major Mode ("none" | "cs" | "ilr") + mode-specific filters
+  const [majorMode, setMajorMode] = useState<MajorMode>(() => resolveUserMajorMode(user));
+  const showCsFeatures = majorMode === "cs";
+  const showIlrFeatures = majorMode === "ilr";
   const [csRequirement, setCsRequirement] = useState<CSRequirementMode>("");
   const [levelMin, setLevelMin] = useState<number | null>(null);
   const [curriculum, setCurriculum] = useState<CSCurriculumMode>("current");
   const [include2000TE, setInclude2000TE] = useState(true);
   const [includeResearchTE, setIncludeResearchTE] = useState(true);
+  const [ilrCodes, setIlrCodes] = useState<string[]>([]);
+  const [ilrMatch, setIlrMatch] = useState<IlrMatchMode>("any");
+  const [ilrMultiOnly, setIlrMultiOnly] = useState(false);
+  const [ilrSummary, setIlrSummary] = useState<IlrSummaryResponse | null>(null);
+  const [loadingIlrSummary, setLoadingIlrSummary] = useState(false);
+  const [syncingIlrPriority, setSyncingIlrPriority] = useState(false);
   const [onlyEligible, setOnlyEligible] = useState(false);
   const [ithacaOrVirtual, setIthacaOrVirtual] = useState(true);
   const [prereqsModalOpen, setPrereqsModalOpen] = useState(false);
@@ -160,11 +181,16 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
   const lastProcessedRefreshRef = useRef<CatalogSubjectRefreshedSSE | null>(null);
 
   useEffect(() => {
-    setShowCsFeatures(user.show_cs_features ?? true);
-    if (user.show_cs_features === false) {
+    const resolved = resolveUserMajorMode(user);
+    setMajorMode(resolved);
+    if (resolved !== "cs") {
       setCsRequirement("");
     }
-  }, [user.show_cs_features]);
+    if (resolved !== "ilr") {
+      setIlrCodes([]);
+      setIlrMultiOnly(false);
+    }
+  }, [user.major_mode, user.show_cs_features]);
 
   useEffect(() => {
     api
@@ -177,6 +203,24 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load rosters"));
   }, []);
 
+  const loadIlrSummary = useCallback(
+    async (roster: string, ithVirt: boolean, syncPriority = false) => {
+      if (!roster) return;
+      if (syncPriority) setSyncingIlrPriority(true);
+      else setLoadingIlrSummary(true);
+      try {
+        const res = await api.getIlrSummary(roster, ithVirt, syncPriority);
+        setIlrSummary(res);
+      } catch {
+        // Non-fatal: keep existing summary if background fetch fails
+      } finally {
+        setLoadingIlrSummary(false);
+        setSyncingIlrPriority(false);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
     if (!selectedRoster) return;
     api
@@ -188,6 +232,11 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       .then((st) => setCatalogStatus(st))
       .catch(() => {});
   }, [selectedRoster]);
+
+  useEffect(() => {
+    if (!selectedRoster || !showIlrFeatures) return;
+    void loadIlrSummary(selectedRoster, ithacaOrVirtual, false);
+  }, [selectedRoster, showIlrFeatures, ithacaOrVirtual, loadIlrSummary]);
 
   const loadInsights = useCallback(
     async (course: CourseSummary, refresh = false) => {
@@ -216,8 +265,13 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       if (!r) return;
       const q = override?.query ?? query;
       const subjs = override?.subjects ?? selectedSubjects;
-      const csEnabled = override?.showCsFeatures ?? showCsFeatures;
+      const effMode = override?.majorMode ?? majorMode;
+      const csEnabled = effMode === "cs";
+      const ilrEnabled = effMode === "ilr";
       const req = csEnabled ? (override?.csRequirement ?? csRequirement) : "";
+      const effIlrCodes = ilrEnabled ? (override?.ilrCodes ?? ilrCodes) : [];
+      const effIlrMatch = override?.ilrMatch ?? ilrMatch;
+      const effIlrMultiOnly = ilrEnabled ? (override?.ilrMultiOnly ?? ilrMultiOnly) : false;
       const lvl = override?.levelMin !== undefined ? override.levelMin : levelMin;
       const inc2000 = override?.include2000TE ?? include2000TE;
       const incRes = override?.includeResearchTE ?? includeResearchTE;
@@ -225,13 +279,16 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       const eligibleOnly = override?.onlyEligible ?? onlyEligible;
       const ithVirt = override?.ithacaOrVirtual ?? ithacaOrVirtual;
       const silent = Boolean(override?.silent);
+      const hasIlrCriteria = effIlrCodes.length > 0 || effIlrMultiOnly;
 
-      if (!q.trim() && subjs.length === 0 && !req && !lvl && !eligibleOnly) {
+      if (!q.trim() && subjs.length === 0 && !req && !hasIlrCriteria && !lvl && !eligibleOnly) {
         if (!silent) {
           setError(
-            csEnabled
-              ? "Enter a course code, keyword, class #, pick subjects, or select a CS requirement filter."
-              : "Enter a course code, keyword, class #, or pick one or more subjects."
+            ilrEnabled
+              ? "Pick an ILR distribution code/preset above, select subjects, or enter a keyword or course code."
+              : csEnabled
+                ? "Enter a course code, keyword, class #, pick subjects, or select a CS requirement filter."
+                : "Enter a course code, keyword, class #, or pick one or more subjects."
           );
         }
         return;
@@ -251,10 +308,14 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
           include_2000_te: inc2000,
           include_research_te: incRes,
           curriculum: curr,
+          ilr_codes: effIlrCodes,
+          ilr_match: effIlrMatch,
+          ilr_multi_only: effIlrMultiOnly,
+          include_ilr: ilrEnabled,
           only_eligible: eligibleOnly,
           ithaca_or_virtual: ithVirt,
           refresh_stale: true,
-          limit: req ? 150 : 100,
+          limit: req || hasIlrCriteria ? 150 : 100,
         });
         setCourses(res.courses);
         if (res.meta) {
@@ -285,6 +346,9 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         if (csEnabled && req === "tech_elective" && subjs.length === 0 && (res.meta?.stem_synced ?? 0) < (res.meta?.stem_total ?? 0)) {
           pendingMissing.add("__STEM_WARMUP__");
         }
+        if (ilrEnabled && hasIlrCriteria) {
+          pendingMissing.add("__ILR_WARMUP__");
+        }
         uncachedRequestedRef.current = pendingMissing;
       } catch (err) {
         if (!silent) {
@@ -296,7 +360,23 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         }
       }
     },
-    [selectedRoster, query, selectedSubjects, showCsFeatures, csRequirement, levelMin, include2000TE, includeResearchTE, curriculum, onlyEligible, ithacaOrVirtual, loadInsights]
+    [
+      selectedRoster,
+      query,
+      selectedSubjects,
+      majorMode,
+      csRequirement,
+      ilrCodes,
+      ilrMatch,
+      ilrMultiOnly,
+      levelMin,
+      include2000TE,
+      includeResearchTE,
+      curriculum,
+      onlyEligible,
+      ithacaOrVirtual,
+      loadInsights,
+    ]
   );
 
   // Live SSE handler: flip "Loading live status..." -> Open/Waitlist/Closed smoothly in real time
@@ -361,12 +441,17 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
     if (
       hasSearchedRef.current &&
       lastCatalogRefresh.courses_count > 0 &&
-      (uncachedRequestedRef.current.has(refreshedSubj) || uncachedRequestedRef.current.has("__STEM_WARMUP__"))
+      (uncachedRequestedRef.current.has(refreshedSubj) ||
+        uncachedRequestedRef.current.has("__STEM_WARMUP__") ||
+        uncachedRequestedRef.current.has("__ILR_WARMUP__"))
     ) {
       uncachedRequestedRef.current.delete(refreshedSubj);
       void executeSearch({ silent: true });
     }
-  }, [lastCatalogRefresh, selectedRoster, executeSearch]);
+    if (showIlrFeatures && selectedRoster) {
+      void loadIlrSummary(selectedRoster, ithacaOrVirtual, false);
+    }
+  }, [lastCatalogRefresh, selectedRoster, showIlrFeatures, ithacaOrVirtual, executeSearch, loadIlrSummary]);
 
   const filterCounts = useMemo(() => {
     let open = 0;
@@ -423,42 +508,103 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
     }
   }
 
-  function handleToggleCsFeatures(nextShow: boolean) {
+  function handleChangeMajorMode(nextMode: MajorMode) {
+    if (nextMode === majorMode) return;
     setError("");
-    setShowCsFeatures(nextShow);
-    onUserUpdated?.({ ...user, show_cs_features: nextShow });
+    const prevMode = majorMode;
+    setMajorMode(nextMode);
+    onUserUpdated?.({
+      ...user,
+      major_mode: nextMode,
+      show_cs_features: nextMode === "cs",
+    });
 
-    if (!nextShow) {
-      const wasCsMode = csRequirement !== "";
-      const nextLevel = csRequirement === "external_spec" && levelMin === 3000 ? null : levelMin;
-      if (wasCsMode) {
-        setCsRequirement("");
-        if (nextLevel !== levelMin) setLevelMin(nextLevel);
-        if (query.trim() || selectedSubjects.length > 0 || nextLevel || onlyEligible) {
-          void executeSearch({
-            showCsFeatures: false,
-            csRequirement: "",
-            subjects: selectedSubjects,
-            levelMin: nextLevel,
-          });
-        } else {
-          setCourses([]);
-          setSearchMeta(null);
-          hasSearchedRef.current = false;
-        }
+    const hadCsReq = prevMode === "cs" && csRequirement !== "";
+    const hadIlrReq = prevMode === "ilr" && (ilrCodes.length > 0 || ilrMultiOnly);
+    const nextLevel =
+      prevMode === "cs" && csRequirement === "external_spec" && levelMin === 3000
+        ? null
+        : levelMin;
+
+    if (nextMode !== "cs" && csRequirement !== "") {
+      setCsRequirement("");
+      if (nextLevel !== levelMin) setLevelMin(nextLevel);
+    }
+    if (nextMode !== "ilr" && (ilrCodes.length > 0 || ilrMultiOnly)) {
+      setIlrCodes([]);
+      setIlrMultiOnly(false);
+    }
+
+    const hasRemainingFilter = Boolean(
+      query.trim() || selectedSubjects.length > 0 || nextLevel || onlyEligible
+    );
+    if (hadCsReq || hadIlrReq) {
+      if (hasRemainingFilter) {
+        void executeSearch({
+          majorMode: nextMode,
+          csRequirement: nextMode === "cs" ? csRequirement : "",
+          ilrCodes: nextMode === "ilr" ? ilrCodes : [],
+          ilrMultiOnly: nextMode === "ilr" ? ilrMultiOnly : false,
+          levelMin: nextLevel,
+        });
+      } else {
+        setCourses([]);
+        setSearchMeta(null);
+        hasSearchedRef.current = false;
       }
+    } else if (hasSearchedRef.current && (nextMode === "ilr" || nextMode === "cs")) {
+      void executeSearch({ majorMode: nextMode, silent: true });
     }
 
     api
-      .updateUserPreferences({ show_cs_features: nextShow })
+      .updateUserPreferences({ major_mode: nextMode })
       .then((res) => {
         onUserUpdated?.(res.user);
       })
       .catch((err) => {
-        setShowCsFeatures(!nextShow);
-        onUserUpdated?.({ ...user, show_cs_features: !nextShow });
+        setMajorMode(prevMode);
+        onUserUpdated?.({
+          ...user,
+          major_mode: prevMode,
+          show_cs_features: prevMode === "cs",
+        });
         setError(err instanceof Error ? err.message : "Failed to save preference");
       });
+  }
+
+  function applyIlrFilters(nextCodes: string[], nextMatch: IlrMatchMode, nextMultiOnly: boolean) {
+    setError("");
+    setIlrCodes(nextCodes);
+    setIlrMatch(nextMatch);
+    setIlrMultiOnly(nextMultiOnly);
+
+    const hasFilter =
+      nextCodes.length > 0 ||
+      nextMultiOnly ||
+      Boolean(query.trim()) ||
+      selectedSubjects.length > 0 ||
+      Boolean(levelMin) ||
+      onlyEligible;
+
+    if (hasFilter) {
+      void executeSearch({
+        majorMode: "ilr",
+        ilrCodes: nextCodes,
+        ilrMatch: nextMatch,
+        ilrMultiOnly: nextMultiOnly,
+      });
+    } else {
+      setCourses([]);
+      setSearchMeta(null);
+      hasSearchedRef.current = false;
+    }
+  }
+
+  function handleToggleIlrCode(code: string) {
+    const cleaned = ilrCodes.filter((c) => c !== "ANY_IL");
+    const exists = cleaned.includes(code);
+    const nextCodes = exists ? cleaned.filter((c) => c !== code) : [...cleaned, code];
+    applyIlrFilters(nextCodes, ilrMatch, ilrMultiOnly);
   }
 
   function toggleCourse(course: CourseSummary) {
@@ -549,7 +695,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
   return (
     <div className="space-y-4">
       <form onSubmit={runSearchForm} className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
-        {/* CS Major Requirement Segmented Bar + Toggle */}
+        {/* Major Mode Bar + 3-Way Persisted Switcher */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
           {showCsFeatures ? (
             <div className="flex flex-wrap items-center gap-1.5">
@@ -576,6 +722,16 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                 );
               })}
             </div>
+          ) : showIlrFeatures ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-200">
+                <GraduationCap className="h-4 w-4 text-teal-400" />
+                ILR New Curriculum Explorer
+              </span>
+              <span className="text-[11px] text-zinc-400">
+                Click any distribution code or preset below to view live semester options
+              </span>
+            </div>
           ) : (
             <div className="text-xs font-medium text-zinc-300">Search Cornell Classes</div>
           )}
@@ -585,36 +741,72 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
               <span>
                 Cached: <strong className="text-zinc-200">{syncedSubjectsCount}</strong>/{totalSubjectsCount} subj
                 {showCsFeatures && stemTotalCount > 0 && ` (STEM ${stemSyncedCount}/${stemTotalCount})`}
+                {showIlrFeatures &&
+                  ilrSummary &&
+                  ilrSummary.coverage.ilr_total > 0 &&
+                  ` (ILR ${ilrSummary.coverage.ilr_synced}/${ilrSummary.coverage.ilr_total})`}
               </span>
             )}
-            <button
-              type="button"
-              onClick={() => handleToggleCsFeatures(!showCsFeatures)}
-              title={
-                showCsFeatures
-                  ? "Hide CS Electives, Technical Electives, External Spec filters, and CS degree badges"
-                  : "Show CS Major requirement filters and degree badges"
-              }
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
-                showCsFeatures
-                  ? "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-zinc-500 hover:text-white"
-                  : "border-zinc-700/80 bg-zinc-950 text-zinc-400 hover:border-emerald-500/40 hover:text-emerald-300"
-              }`}
+            <div
+              role="group"
+              aria-label="Major mode"
+              className="inline-flex items-center rounded-lg border border-zinc-700/80 bg-zinc-950 p-0.5"
             >
-              {showCsFeatures ? (
-                <>
-                  <EyeOff className="h-3 w-3 text-zinc-400" />
-                  Hide CS Major
-                </>
-              ) : (
-                <>
-                  <GraduationCap className="h-3 w-3 text-emerald-400" />
-                  Show CS Major
-                </>
-              )}
-            </button>
+              {(
+                [
+                  { id: "none", label: "General", title: "Standard Cornell search without major-specific UI" },
+                  { id: "cs", label: "CS", title: "CS Electives, Technical Electives, and External Spec mode" },
+                  { id: "ilr", label: "ILR", title: "ILR Distribution Codes, 3 Main Electives & Core mode" },
+                ] as const
+              ).map((opt) => {
+                const active = majorMode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    title={opt.title}
+                    aria-pressed={active}
+                    onClick={() => handleChangeMajorMode(opt.id)}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                      active
+                        ? opt.id === "ilr"
+                          ? "bg-teal-500 text-zinc-950"
+                          : opt.id === "cs"
+                            ? "bg-emerald-500 text-zinc-950"
+                            : "bg-zinc-200 text-zinc-950"
+                        : "text-zinc-400 hover:text-zinc-100"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
+
+        {showIlrFeatures && (
+          <IlrDistributionExplorer
+            summary={ilrSummary}
+            loadingSummary={loadingIlrSummary}
+            syncingPriority={syncingIlrPriority}
+            selectedCodes={ilrCodes}
+            matchMode={ilrMatch}
+            multiOnly={ilrMultiOnly}
+            ithacaOrVirtual={ithacaOrVirtual}
+            onSelectPreset={(codes, nextMatch = "any", nextMulti = false) =>
+              applyIlrFilters(codes, nextMatch, nextMulti)
+            }
+            onToggleCode={handleToggleIlrCode}
+            onChangeMatchMode={(nextMatch) => applyIlrFilters(ilrCodes, nextMatch, ilrMultiOnly)}
+            onToggleMultiOnly={() => applyIlrFilters(ilrCodes, ilrMatch, !ilrMultiOnly)}
+            onSyncPrioritySubjects={() => {
+              if (selectedRoster) {
+                void loadIlrSummary(selectedRoster, ithacaOrVirtual, true);
+              }
+            }}
+          />
+        )}
 
         {/* Main Search Grid */}
         <div className="grid gap-3 sm:grid-cols-12">
@@ -670,7 +862,11 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="e.g. cs2110, Machine Learning, Bracy"
+                  placeholder={
+                    showIlrFeatures
+                      ? "e.g. ILRGL 2390, negotiation, ECON 3120"
+                      : "e.g. cs2110, Machine Learning, Bracy"
+                  }
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-950 py-2.5 pl-9 pr-3 text-sm text-white placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
                 />
               </div>
@@ -695,7 +891,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                 onChange={(e) => {
                   const val = e.target.value ? Number(e.target.value) : null;
                   setLevelMin(val);
-                  if (val || csRequirement || selectedSubjects.length > 0 || query.trim()) {
+                  if (val || csRequirement || ilrCodes.length > 0 || ilrMultiOnly || selectedSubjects.length > 0 || query.trim()) {
                     void executeSearch({ levelMin: val });
                   }
                 }}
@@ -805,7 +1001,15 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                   onChange={(e) => {
                     const nextVal = e.target.checked;
                     setOnlyEligible(nextVal);
-                    if (nextVal || csRequirement || selectedSubjects.length > 0 || query.trim() || levelMin) {
+                    if (
+                      nextVal ||
+                      csRequirement ||
+                      ilrCodes.length > 0 ||
+                      ilrMultiOnly ||
+                      selectedSubjects.length > 0 ||
+                      query.trim() ||
+                      levelMin
+                    ) {
                       void executeSearch({ onlyEligible: nextVal });
                     }
                   }}
@@ -822,6 +1026,8 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                   if (
                     hasSearchedRef.current ||
                     csRequirement ||
+                    ilrCodes.length > 0 ||
+                    ilrMultiOnly ||
                     selectedSubjects.length > 0 ||
                     query.trim() ||
                     levelMin ||
@@ -1113,6 +1319,21 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                           </span>
                         ))}
 
+                      {showIlrFeatures &&
+                        course.ilr_eligibility?.badges.map((badge) => (
+                          <span
+                            key={badge.code}
+                            title={badge.rule_summary}
+                            className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${ilrToneClasses(
+                              badge.tone,
+                              ilrCodes.includes(badge.code) || badge.is_main_elective
+                            )}`}
+                          >
+                            {badge.is_main_elective && "★ "}
+                            {badge.code} · {badge.short_label}
+                          </span>
+                        ))}
+
                       {elig?.prereq_status === "met" && (
                         <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
                           <CheckCircle2 className="h-2.5 w-2.5" />
@@ -1144,12 +1365,43 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                       {showCsFeatures && elig?.tech_elective_reason && (csRequirement === "tech_elective" || csRequirement === "") && (
                         <span className="text-sky-300/90">{elig.tech_elective_reason}</span>
                       )}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility &&
+                        ilrCodes.length > 0 &&
+                        !ilrCodes.includes("ANY_IL") &&
+                        course.ilr_eligibility.also_fits_codes.length > 0 && (
+                          <span className="font-medium text-teal-300/95">
+                            Also satisfies {course.ilr_eligibility.also_fits_codes.join(" + ")}
+                          </span>
+                        )}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility &&
+                        (ilrCodes.length === 0 || ilrCodes.includes("ANY_IL")) &&
+                        course.ilr_eligibility.requirement_count >= 2 && (
+                          <span className="font-medium text-teal-300/95">
+                            Satisfies {course.ilr_eligibility.requirement_count} ILR reqs:{" "}
+                            {course.ilr_eligibility.codes.join(" + ")}
+                          </span>
+                        )}
                       {activeWarning && (
                         <span className="inline-flex items-center gap-1 text-amber-300/95">
                           <AlertTriangle className="h-3 w-3 shrink-0" />
                           {activeWarning}
                         </span>
                       )}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility?.warnings.map((warn) => (
+                          <span key={warn} className="inline-flex items-center gap-1 text-amber-300/95">
+                            <AlertTriangle className="h-3 w-3 shrink-0" />
+                            {warn}
+                          </span>
+                        ))}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility?.ug_crosslist_hints.map((hint) => (
+                          <span key={hint} className="inline-flex items-center gap-1 text-sky-300/95">
+                            {hint}
+                          </span>
+                        ))}
                       {course.crosslists && course.crosslists.length > 0 && (
                         <span className="text-zinc-500">Cross-listed: {course.crosslists.join(", ")}</span>
                       )}
@@ -1176,12 +1428,22 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                     course.catalog_coreq ||
                     course.catalog_forbidden_overlaps ||
                     showCsFeatures ||
+                    (showIlrFeatures &&
+                      Boolean(
+                        course.ilr_eligibility &&
+                          (course.ilr_eligibility.qualifies_any ||
+                            course.ilr_eligibility.ug_crosslist_hints.length > 0)
+                      )) ||
                     (elig?.prereq_status && elig.prereq_status !== "none")) && (
                     <div className="space-y-1.5 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-zinc-300">
                         <span className="inline-flex items-center gap-1.5">
                           <BookMarked className="h-3.5 w-3.5 text-emerald-400" />
-                          {showCsFeatures ? "Prerequisites & Degree Check" : "Prerequisites"}
+                          {showCsFeatures
+                            ? "Prerequisites & Degree Check"
+                            : showIlrFeatures
+                              ? "ILR Requirements & Prerequisites"
+                              : "Prerequisites"}
                         </span>
                         {showCsFeatures && (
                           <a
@@ -1194,7 +1456,44 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                             <ExternalLink className="h-3 w-3" />
                           </a>
                         )}
+                        {showIlrFeatures && (
+                          <a
+                            href="https://www.ilr.cornell.edu/current-students/undergraduate-student-resources/curriculum-requirements/new-curriculum-requirements"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 font-normal text-teal-300 hover:underline"
+                          >
+                            ILR Curriculum Rules
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </div>
+                      {showIlrFeatures && course.ilr_eligibility && course.ilr_eligibility.badges.length > 0 && (
+                        <div className="space-y-1 pb-1">
+                          {course.ilr_eligibility.badges.map((badge) => (
+                            <div key={badge.code} className="text-zinc-300">
+                              <span className="font-mono font-semibold text-teal-300">{badge.code}</span>
+                              {" — "}
+                              <span className="font-medium text-zinc-100">{badge.label}</span>
+                              <span className="text-zinc-400"> · {badge.rule_summary}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility?.warnings.map((warn) => (
+                          <div key={warn} className="text-amber-300">
+                            <span className="font-medium">ILR rule check: </span>
+                            {warn}
+                          </div>
+                        ))}
+                      {showIlrFeatures &&
+                        course.ilr_eligibility?.ug_crosslist_hints.map((hint) => (
+                          <div key={hint} className="text-sky-300">
+                            <span className="font-medium">Cross-list note: </span>
+                            {hint}
+                          </div>
+                        ))}
                       {elig?.prereq_status === "met" && elig.satisfied_by && elig.satisfied_by.length > 0 && (
                         <div className="text-emerald-300">
                           <span className="font-medium">Prereq check: </span>
@@ -1489,6 +1788,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         roster={selectedRoster}
         initialCompleted={user.completed_courses || []}
         initialIncludeImplied={user.include_implied_prereqs ?? true}
+        majorMode={majorMode}
         showCsFeatures={showCsFeatures}
         onClose={() => setPrereqsModalOpen(false)}
         onSaved={(res) => {
@@ -1497,7 +1797,15 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
             completed_courses: res.completed_courses,
             include_implied_prereqs: res.include_implied_prereqs,
           });
-          if (hasSearchedRef.current || csRequirement || query.trim() || selectedSubjects.length > 0 || onlyEligible) {
+          if (
+            hasSearchedRef.current ||
+            csRequirement ||
+            ilrCodes.length > 0 ||
+            ilrMultiOnly ||
+            query.trim() ||
+            selectedSubjects.length > 0 ||
+            onlyEligible
+          ) {
             void executeSearch({ silent: true });
           }
         }}

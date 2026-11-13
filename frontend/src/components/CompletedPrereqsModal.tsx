@@ -1,56 +1,99 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, CheckCircle2, Loader2, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
-import type { PrereqCourseOption, UserPrereqsResponse } from "../types";
+import type { MajorMode, PrereqCourseOption, UserPrereqsResponse } from "../types";
 
 interface Props {
   isOpen: boolean;
   roster: string;
   initialCompleted: string[];
   initialIncludeImplied: boolean;
+  majorMode?: MajorMode;
   showCsFeatures?: boolean;
   onClose: () => void;
   onSaved: (res: UserPrereqsResponse) => void;
 }
 
-const PRESET_BUNDLES: Array<{ label: string; hint: string; courses: string[]; csOnly?: boolean }> = [
+const PRESET_BUNDLES: Array<{
+  label: string;
+  hint: string;
+  courses: string[];
+  modes?: MajorMode[];
+}> = [
+  {
+    label: "ILR Core",
+    hint: "ILROB 1220, ILRGL 1100, ECON 1110/1120, ILRGL 2010/2050, ILRHR 2600, ILRLE 2400, ILRST 2100/2110",
+    courses: [
+      "ILROB 1220",
+      "ILRGL 1100",
+      "ECON 1110",
+      "ECON 1120",
+      "ILRGL 2010",
+      "ILRHR 2600",
+      "ILRGL 2050",
+      "ILRLE 2400",
+      "ILRST 2100",
+      "ILRST 2110",
+    ],
+    modes: ["ilr"],
+  },
   {
     label: "Intro CS",
     hint: "CS 1110, CS 2110, CS 2800",
     courses: ["CS 1110", "CS 2110", "CS 2800"],
+    modes: ["cs", "none"],
   },
   {
     label: "Upper CS Core",
     hint: "CS 3110, CS 3410, CS 4820",
     courses: ["CS 3110", "CS 3410", "CS 4820"],
-    csOnly: true,
+    modes: ["cs"],
   },
   {
     label: "CS AI / ML",
     hint: "CS 3780, CS 4700, MATH 2940",
     courses: ["CS 3780", "CS 4700", "MATH 2940"],
-    csOnly: true,
+    modes: ["cs"],
   },
   {
     label: "Eng Math",
     hint: "MATH 1910, MATH 1920, MATH 2940",
     courses: ["MATH 1910", "MATH 1920", "MATH 2940"],
+    modes: ["cs", "none"],
   },
   {
     label: "A&S Math",
     hint: "MATH 1110, MATH 1120, MATH 2210",
     courses: ["MATH 1110", "MATH 1120", "MATH 2210"],
+    modes: ["cs", "none"],
   },
   {
     label: "Eng Stats",
     hint: "ENGRD 2700, BTRY 3080",
     courses: ["ENGRD 2700", "BTRY 3080"],
+    modes: ["cs", "none"],
   },
   {
     label: "ORIE Core",
     hint: "ENGRD 2700, ORIE 3300, ORIE 3500",
     courses: ["ENGRD 2700", "ORIE 3300", "ORIE 3500"],
+    modes: ["cs", "none"],
   },
+];
+
+const ILR_QUICK_TOGGLE_COURSES: string[] = [
+  "ILROB 1220",
+  "ILRGL 1100",
+  "ECON 1110",
+  "ECON 1120",
+  "ILRGL 2010",
+  "ILRHR 2600",
+  "ILRGL 2050",
+  "ILRLE 2400",
+  "ILRST 2100",
+  "ILRST 2110",
+  "STSCI 2100",
+  "CS 1110",
 ];
 
 const QUICK_TOGGLE_COURSES: string[] = [
@@ -140,10 +183,17 @@ export function CompletedPrereqsModal({
   roster,
   initialCompleted,
   initialIncludeImplied,
+  majorMode,
   showCsFeatures = true,
   onClose,
   onSaved,
 }: Props) {
+  const effectiveMode: MajorMode = majorMode ?? (showCsFeatures ? "cs" : "none");
+  const quickToggleCourses =
+    effectiveMode === "ilr" ? ILR_QUICK_TOGGLE_COURSES : QUICK_TOGGLE_COURSES;
+  const visibleBundles = PRESET_BUNDLES.filter(
+    (bundle) => !bundle.modes || bundle.modes.includes(effectiveMode)
+  );
   const [selectedCourses, setSelectedCourses] = useState<string[]>([]);
   const [includeImplied, setIncludeImplied] = useState(true);
   const [serverImplied, setServerImplied] = useState<string[]>([]);
@@ -182,13 +232,13 @@ export function CompletedPrereqsModal({
     const handle = window.setTimeout(() => {
       setLoadingOptions(true);
       api
-        .getPrereqOptions(roster, searchText.trim(), 25)
+        .getPrereqOptions(roster, searchText.trim(), 25, effectiveMode)
         .then((res) => setOptions(res.options))
         .catch(() => setOptions([]))
         .finally(() => setLoadingOptions(false));
     }, 160);
     return () => window.clearTimeout(handle);
-  }, [isOpen, roster, searchText]);
+  }, [isOpen, roster, searchText, effectiveMode]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -380,7 +430,7 @@ export function CompletedPrereqsModal({
               1-Click Track Presets
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {PRESET_BUNDLES.filter((bundle) => showCsFeatures || !bundle.csOnly).map((bundle) => {
+              {visibleBundles.map((bundle) => {
                 const active = bundle.courses.every((c) => selectedSet.has(c));
                 return (
                   <button
@@ -408,7 +458,7 @@ export function CompletedPrereqsModal({
               Common Cornell Prereqs
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {QUICK_TOGGLE_COURSES.map((code) => {
+              {quickToggleCourses.map((code) => {
                 const active = selectedSet.has(code);
                 return (
                   <button
@@ -451,7 +501,11 @@ export function CompletedPrereqsModal({
                       }
                     }
                   }}
-                  placeholder="e.g. CS 2110, linear algebra, AP 1110..."
+                  placeholder={
+                    effectiveMode === "ilr"
+                      ? "e.g. ECON 1110, ILRST 2100, ILROB 1220..."
+                      : "e.g. CS 2110, linear algebra, AP 1110..."
+                  }
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-950 py-2 pl-9 pr-3 text-xs text-white placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
                 />
               </div>

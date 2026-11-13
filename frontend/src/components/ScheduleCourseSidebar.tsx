@@ -19,66 +19,23 @@ import type {
   ScheduleSection,
 } from "../types";
 import { StatusBadge } from "./StatusBadge";
+import { getCourseEffectiveMetrics, getDifficultyTier } from "../utils/scheduleInsights";
 import {
   findCompatibleSectionsForCourse,
   formatMinutesShort,
   getCourseColor,
+  selectSectionInCourse,
 } from "../utils/schedulerSolver";
 
 const ALL_DAYS: DayCode[] = ["M", "T", "W", "R", "F"];
-
-function selectSectionInCourse(
-  course: ScheduleCourseItem,
-  targetSection: ScheduleSection
-): number[] {
-  const targetEg = course.enroll_groups.find(
-    (eg) => eg.enroll_group_idx === targetSection.enroll_group_idx
-  );
-  if (!targetEg) return [targetSection.class_nbr];
-
-  const reqComps =
-    targetEg.components_required.length > 0
-      ? targetEg.components_required
-      : Array.from(new Set(targetEg.sections.map((s) => s.ssr_component).filter(Boolean)));
-
-  const egNbrMap = new Map<number, ScheduleSection>();
-  for (const s of targetEg.sections) {
-    egNbrMap.set(s.class_nbr, s);
-  }
-
-  // Keep any currently selected sections that already belong to targetEg for other components
-  const byComp = new Map<string, number>();
-  for (const nbr of course.selected_class_nbrs) {
-    const existing = egNbrMap.get(nbr);
-    if (existing && existing.ssr_component !== targetSection.ssr_component) {
-      byComp.set(existing.ssr_component, existing.class_nbr);
-    }
-  }
-  byComp.set(targetSection.ssr_component, targetSection.class_nbr);
-
-  // Fill any missing required components in targetEg
-  for (const comp of reqComps) {
-    if (byComp.has(comp)) continue;
-    const candidates = targetEg.sections
-      .filter((s) => s.ssr_component === comp)
-      .sort((a, b) => {
-        const rA = a.open_status === "O" ? 0 : a.open_status === "W" ? 1 : 2;
-        const rB = b.open_status === "O" ? 0 : b.open_status === "W" ? 1 : 2;
-        return rA - rB || a.class_nbr - b.class_nbr;
-      });
-    if (candidates.length > 0) {
-      byComp.set(comp, candidates[0].class_nbr);
-    }
-  }
-
-  return Array.from(byComp.values());
-}
 
 interface Props {
   courses: ScheduleCourseItem[];
   blocks: ScheduleBlock[];
   expandedCourseId: number | null;
   watchBusyKey: string | null;
+  isTranscript?: boolean;
+  isArchivedRoster?: boolean;
   onToggleExpand: (itemId: number) => void;
   onUpdateCourse: (
     itemId: number,
@@ -104,6 +61,8 @@ export function ScheduleCourseSidebar({
   blocks,
   expandedCourseId,
   watchBusyKey,
+  isTranscript = false,
+  isArchivedRoster = false,
   onToggleExpand,
   onUpdateCourse,
   onRemoveCourse,
@@ -217,7 +176,10 @@ export function ScheduleCourseSidebar({
                   <div className="flex items-start justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() => onToggleExpand(course.id)}
+                      onClick={() => {
+                        onHoverSection(null);
+                        onToggleExpand(course.id);
+                      }}
                       className="flex min-w-0 flex-1 items-start gap-2 text-left"
                     >
                       <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${style.dot}`} />
@@ -229,17 +191,41 @@ export function ScheduleCourseSidebar({
                           <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
                             {effUnits} cr
                           </span>
-                          {course.cached_insights?.rating != null && (
-                            <span
-                              className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200"
-                              title="CU Reviews Rating / Workload"
-                            >
-                              ★ {course.cached_insights.rating.toFixed(1)}
-                              {course.cached_insights.workload != null
-                                ? ` · Wk ${course.cached_insights.workload.toFixed(1)}`
-                                : ""}
-                            </span>
-                          )}
+                          {(() => {
+                            const eff = getCourseEffectiveMetrics(course);
+                            const diffTier =
+                              eff.difficulty != null ? getDifficultyTier(eff.difficulty) : null;
+                            return (
+                              <>
+                                {eff.difficulty != null && diffTier && (
+                                  <span
+                                    className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${diffTier.badgeClass}`}
+                                    title={
+                                      eff.difficultySource === "rmp"
+                                        ? `RateMyProfessors Avg Difficulty (${diffTier.label})`
+                                        : `CU Reviews Course Difficulty (${diffTier.label})`
+                                    }
+                                  >
+                                    {eff.difficultySource === "rmp" ? "RMP " : ""}Diff{" "}
+                                    {eff.difficulty.toFixed(1)}/5
+                                  </span>
+                                )}
+                                {(eff.rating != null || eff.workload != null) && (
+                                  <span
+                                    className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200"
+                                    title="CU Reviews Rating & Workload"
+                                  >
+                                    {[
+                                      eff.rating != null ? `★ ${eff.rating.toFixed(1)}` : null,
+                                      eff.workload != null ? `Wk ${eff.workload.toFixed(1)}` : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </span>
+                                )}
+                              </>
+                            );
+                          })()}
                           {course.cs_eligibility?.prereq_status === "unmet" && (
                             <span
                               className="rounded border border-rose-500/35 bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-300"
@@ -260,18 +246,20 @@ export function ScheduleCourseSidebar({
                     </button>
 
                     <div className="flex shrink-0 items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onUpdateCourse(course.id, { enabled: !course.enabled })}
-                        title={course.enabled ? "Hide from calendar" : "Show on calendar"}
-                        className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-                      >
-                        {course.enabled ? (
-                          <Eye className="h-3.5 w-3.5 text-emerald-400" />
-                        ) : (
-                          <EyeOff className="h-3.5 w-3.5" />
-                        )}
-                      </button>
+                      {!isTranscript && (
+                        <button
+                          type="button"
+                          onClick={() => onUpdateCourse(course.id, { enabled: !course.enabled })}
+                          title={course.enabled ? "Hide from calendar" : "Show on calendar"}
+                          className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                        >
+                          {course.enabled ? (
+                            <Eye className="h-3.5 w-3.5 text-emerald-400" />
+                          ) : (
+                            <EyeOff className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onToggleExpand(course.id)}
@@ -284,14 +272,16 @@ export function ScheduleCourseSidebar({
                           <ChevronDown className="h-3.5 w-3.5" />
                         )}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onRemoveCourse(course.id)}
-                        title="Remove from schedule"
-                        className="rounded-lg p-1.5 text-zinc-400 hover:bg-rose-500/15 hover:text-rose-300"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {!isTranscript && (
+                        <button
+                          type="button"
+                          onClick={() => onRemoveCourse(course.id)}
+                          title="Remove from schedule"
+                          className="rounded-lg p-1.5 text-zinc-400 hover:bg-rose-500/15 hover:text-rose-300"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -369,7 +359,7 @@ export function ScheduleCourseSidebar({
                       </div>
                     )}
 
-                    {compatibleWatchTargets.length > 0 && (
+                    {!isArchivedRoster && compatibleWatchTargets.length > 0 && (
                       <button
                         type="button"
                         disabled={watchBusyKey === `course-${course.id}`}
@@ -466,6 +456,33 @@ export function ScheduleCourseSidebar({
                                         <div className="truncate text-[10px] text-zinc-500">
                                           {sec.instructors_summary}
                                         </div>
+                                        {sec.instructors.some((nm) => course.cached_rmp?.[nm]) && (
+                                          <div className="mt-0.5 flex flex-wrap gap-1">
+                                            {sec.instructors.map((nm) => {
+                                              const rmp = course.cached_rmp?.[nm];
+                                              if (!rmp || (rmp.avg_rating == null && rmp.avg_difficulty == null)) {
+                                                return null;
+                                              }
+                                              return (
+                                                <span
+                                                  key={nm}
+                                                  className="rounded bg-zinc-800/90 px-1.5 py-0.5 text-[9px] text-amber-200/90"
+                                                  title={`RateMyProfessors for ${nm} (${rmp.num_ratings} ratings)`}
+                                                >
+                                                  RMP:{" "}
+                                                  {[
+                                                    rmp.avg_rating != null ? `★ ${rmp.avg_rating.toFixed(1)}` : null,
+                                                    rmp.avg_difficulty != null
+                                                      ? `Diff ${rmp.avg_difficulty.toFixed(1)}/5`
+                                                      : null,
+                                                  ]
+                                                    .filter(Boolean)
+                                                    .join(" · ")}
+                                                </span>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
                                       </div>
                                       <StatusBadge status={sec.open_status} />
                                     </button>

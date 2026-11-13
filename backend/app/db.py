@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS users (
     personal_webhook_url TEXT,
     web_push_enabled INTEGER NOT NULL DEFAULT 1,
     completed_courses_json TEXT NOT NULL DEFAULT '[]',
+    completed_course_details_json TEXT NOT NULL DEFAULT '{}',
+    in_progress_courses_json TEXT NOT NULL DEFAULT '[]',
+    in_progress_course_details_json TEXT NOT NULL DEFAULT '{}',
     include_implied_prereqs INTEGER NOT NULL DEFAULT 1,
     show_cs_features INTEGER NOT NULL DEFAULT 1,
     major_mode TEXT NOT NULL DEFAULT 'cs',
@@ -222,6 +225,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     roster TEXT NOT NULL,
     name TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
+    is_transcript INTEGER NOT NULL DEFAULT 0,
     share_enabled INTEGER NOT NULL DEFAULT 0,
     share_token TEXT UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -276,6 +280,9 @@ def build_fts_query(raw_query: str) -> str:
 
 _USERS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("completed_courses_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("completed_course_details_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("in_progress_courses_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("in_progress_course_details_json", "TEXT NOT NULL DEFAULT '{}'"),
     ("include_implied_prereqs", "INTEGER NOT NULL DEFAULT 1"),
     ("show_cs_features", "INTEGER NOT NULL DEFAULT 1"),
     ("major_mode", "TEXT NOT NULL DEFAULT 'cs'"),
@@ -306,6 +313,10 @@ _ROSTER_SECTIONS_MIGRATIONS: tuple[tuple[str, str], ...] = (
 _WATCHES_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("ithaca_or_virtual", "INTEGER NOT NULL DEFAULT 0"),
     ("group_key", "TEXT NOT NULL DEFAULT ''"),
+)
+
+_SCHEDULES_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("is_transcript", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -342,6 +353,7 @@ class Database:
         await self._migrate_courses_meta()
         await self._migrate_roster_sections()
         await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
+        await self._ensure_columns("schedules", _SCHEDULES_MIGRATIONS)
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_watches_group ON watches (user_id, group_key, active)"
         )

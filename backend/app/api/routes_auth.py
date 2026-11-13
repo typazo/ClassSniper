@@ -25,7 +25,7 @@ from app.api.schemas import (
     RegisterInviteRequest,
     UserPreferencesRequest,
 )
-from app.services.cs_requirements import decode_completed_courses
+from app.services.cs_requirements import decode_completed_course_details, decode_completed_courses
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -35,6 +35,21 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         list(user["completed_courses"])
         if isinstance(user.get("completed_courses"), list)
         else decode_completed_courses(user.get("completed_courses_json"))
+    )
+    completed_details = (
+        dict(user["completed_course_details"])
+        if isinstance(user.get("completed_course_details"), dict)
+        else decode_completed_course_details(user.get("completed_course_details_json"))
+    )
+    in_progress = (
+        list(user["in_progress_courses"])
+        if isinstance(user.get("in_progress_courses"), list)
+        else decode_completed_courses(user.get("in_progress_courses_json"))
+    )
+    in_progress_details = (
+        dict(user["in_progress_course_details"])
+        if isinstance(user.get("in_progress_course_details"), dict)
+        else decode_completed_course_details(user.get("in_progress_course_details_json"))
     )
     raw_implied = user.get("include_implied_prereqs")
     mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
@@ -48,6 +63,9 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "web_push_enabled": bool(user.get("web_push_enabled", 1)),
         "has_personal_webhook": bool((user.get("personal_webhook_url") or "").strip()),
         "completed_courses": completed,
+        "completed_course_details": completed_details,
+        "in_progress_courses": in_progress,
+        "in_progress_course_details": in_progress_details,
         "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
         "major_mode": mode,
         "show_cs_features": show_cs,
@@ -72,7 +90,9 @@ async def auth_status(
                 """
                 SELECT id, username, role, priority_tier, discord_user_id,
                        discord_ping_enabled, personal_webhook_url, web_push_enabled,
-                       completed_courses_json, include_implied_prereqs, show_cs_features,
+                       completed_courses_json, completed_course_details_json,
+                       in_progress_courses_json, in_progress_course_details_json,
+                       include_implied_prereqs, show_cs_features,
                        major_mode
                 FROM users
                 WHERE id = ?
@@ -139,7 +159,9 @@ async def login(
         """
         SELECT id, username, password_hash, role, priority_tier, discord_user_id,
                discord_ping_enabled, personal_webhook_url, web_push_enabled,
-               completed_courses_json, include_implied_prereqs, show_cs_features,
+               completed_courses_json, completed_course_details_json,
+               in_progress_courses_json, in_progress_course_details_json,
+               include_implied_prereqs, show_cs_features,
                major_mode
         FROM users
         WHERE username = ?

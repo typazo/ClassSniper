@@ -464,8 +464,8 @@ class SchedulerService:
         roster_u = roster.upper()
         rows = await self.db.fetch_all(
             """
-            SELECT s.id, s.roster, s.name, s.is_active, s.share_enabled, s.share_token,
-                   s.created_at, s.updated_at,
+            SELECT s.id, s.roster, s.name, s.is_active, s.is_transcript,
+                   s.share_enabled, s.share_token, s.created_at, s.updated_at,
                    (SELECT COUNT(*) FROM schedule_courses sc WHERE sc.schedule_id = s.id) AS course_count
             FROM schedules s
             WHERE s.user_id = ? AND s.roster = ?
@@ -477,16 +477,16 @@ class SchedulerService:
             async with self.db.write_tx() as conn:
                 cur = await conn.execute(
                     """
-                    INSERT INTO schedules (user_id, roster, name, is_active)
-                    VALUES (?, ?, 'Main Schedule', 1)
+                    INSERT INTO schedules (user_id, roster, name, is_active, is_transcript)
+                    VALUES (?, ?, 'Main Schedule', 1, 0)
                     """,
                     (user_id, roster_u),
                 )
                 sched_id = cur.lastrowid
             rows = await self.db.fetch_all(
                 """
-                SELECT s.id, s.roster, s.name, s.is_active, s.share_enabled, s.share_token,
-                       s.created_at, s.updated_at, 0 AS course_count
+                SELECT s.id, s.roster, s.name, s.is_active, s.is_transcript,
+                       s.share_enabled, s.share_token, s.created_at, s.updated_at, 0 AS course_count
                 FROM schedules s
                 WHERE s.id = ?
                 """,
@@ -502,6 +502,7 @@ class SchedulerService:
                     "roster": str(r["roster"]),
                     "name": str(r["name"]),
                     "is_active": bool(r["is_active"]),
+                    "is_transcript": bool(r.get("is_transcript")),
                     "share_enabled": share_enabled,
                     "share_token": r["share_token"] if share_enabled else None,
                     "share_url": self._build_share_url(r["share_token"], share_enabled),
@@ -602,6 +603,9 @@ class SchedulerService:
         if sched is None:
             return None
 
+        if bool(sched.get("is_transcript")) and name is not None and name.strip() != str(sched["name"]):
+            raise PermissionError("Cannot rename a Transcript schedule.")
+
         new_name = name.strip() if name is not None else str(sched["name"])
         new_share_enabled = bool(sched["share_enabled"]) if share_enabled is None else bool(share_enabled)
         new_token = sched["share_token"]
@@ -656,10 +660,15 @@ class SchedulerService:
         selected_class_nbrs: Optional[list[int]] = None,
         locked_class_nbrs: Optional[list[int]] = None,
         color_idx: Optional[int] = None,
+        allow_transcript_mutation: bool = False,
     ) -> dict[str, Any]:
         sched = await self._get_owned_schedule(schedule_id, user_id)
         if sched is None:
             raise LookupError("Schedule not found")
+        if bool(sched.get("is_transcript")) and not allow_transcript_mutation:
+            raise PermissionError(
+                "Courses on a Transcript schedule are locked. Duplicate it to a new schedule to add or remove courses."
+            )
         roster_u = str(sched["roster"]).upper()
         subject_u = subject.strip().upper()
         nbr_clean = catalog_nbr.strip()
@@ -758,6 +767,200 @@ class SchedulerService:
 
         return await self.hydrate_schedule(schedule_id, user_id=user_id)
 
+    async def merge_imported_courses(
+        self,
+        user_id: int,
+        roster: str,
+        courses: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Add missing transcript courses to a dedicated Transcript schedule for roster and enrich missing details."""
+        roster_u = roster.strip().upper()
+        schedules = await self.list_schedules(user_id, roster_u)
+        active = next((s for s in schedules if s["is_active"]), schedules[0])
+
+        transcript_sched = next((s for s in schedules if s.get("is_transcript")), None)
+        if transcript_sched is None:
+            legacy_named = next(
+                (s for s in schedules if str(s.get("name") or "").strip().lower() == "transcript"),
+                None,
+            )
+            if legacy_named is not None:
+                async with self.db.write_tx() as conn:
+                    await conn.execute(
+                        "UPDATE schedules SET is_transcript = 1 WHERE id = ? AND user_id = ?",
+                        (int(legacy_named["id"]), user_id),
+                    )
+                transcript_sched = legacy_named
+            else:
+                async with self.db.write_tx() as conn:
+                    cur = await conn.execute(
+                        """
+                        INSERT INTO schedules (user_id, roster, name, is_active, is_transcript)
+                        VALUES (?, ?, 'Transcript', 0, 1)
+                        """,
+                        (user_id, roster_u),
+                    )
+                    new_t_id = int(cur.lastrowid)
+                transcript_sched = {
+                    "id": new_t_id,
+                    "roster": roster_u,
+                    "name": "Transcript",
+                    "is_active": False,
+                    "is_transcript": True,
+                }
+
+        schedule_id = int(transcript_sched["id"])
+        sched_name = str(transcript_sched.get("name") or "Transcript")
+
+        # Activate the Transcript schedule automatically if the current active schedule is empty
+        # or only holds a subset of the imported courses (e.g., an earlier pre-Transcript import).
+        if int(active["id"]) != schedule_id:
+            should_activate = False
+            if int(active.get("course_count") or 0) == 0:
+                blk_row = await self.db.fetch_one(
+                    "SELECT COUNT(*) AS cnt FROM schedule_blocks WHERE schedule_id = ?",
+                    (int(active["id"]),),
+                )
+                should_activate = (int(blk_row["cnt"]) if blk_row else 0) == 0
+            elif str(active.get("name") or "").strip().lower() == "main schedule":
+                imported_keys = {
+                    tuple(str(entry.get("course") or "").strip().upper().split(" ", 1))
+                    for entry in courses
+                    if " " in str(entry.get("course") or "").strip()
+                }
+                active_rows = await self.db.fetch_all(
+                    "SELECT subject, catalog_nbr FROM schedule_courses WHERE schedule_id = ?",
+                    (int(active["id"]),),
+                )
+                active_keys = {
+                    (str(r["subject"]).upper(), str(r["catalog_nbr"]).upper())
+                    for r in active_rows
+                }
+                if active_keys and active_keys.issubset(imported_keys):
+                    should_activate = True
+
+            if should_activate:
+                async with self.db.write_tx() as conn:
+                    await conn.execute(
+                        "UPDATE schedules SET is_active = 0 WHERE user_id = ? AND roster = ?",
+                        (user_id, roster_u),
+                    )
+                    await conn.execute(
+                        "UPDATE schedules SET is_active = 1 WHERE id = ? AND user_id = ?",
+                        (schedule_id, user_id),
+                    )
+
+        existing_rows = await self.db.fetch_all(
+            "SELECT * FROM schedule_courses WHERE schedule_id = ?",
+            (schedule_id,),
+        )
+        existing_by_key: dict[tuple[str, str], dict[str, Any]] = {
+            (str(r["subject"]).upper(), str(r["catalog_nbr"]).upper()): r
+            for r in existing_rows
+        }
+
+        added: list[str] = []
+        updated: list[str] = []
+        already_present: list[str] = []
+        skipped: list[dict[str, str]] = []
+        seen_batch: set[tuple[str, str]] = set()
+
+        for entry in courses:
+            code = str(entry.get("course") or "").strip().upper()
+            if " " not in code:
+                continue
+            subj, nbr = code.split(" ", 1)
+            key = (subj, nbr)
+            if key in seen_batch:
+                continue
+            seen_batch.add(key)
+
+            parsed_units: Optional[float] = None
+            raw_cr = str(entry.get("cr") or "").strip()
+            if raw_cr:
+                try:
+                    u_val = float(raw_cr)
+                    if 0.0 < u_val <= 20.0:
+                        parsed_units = u_val
+                except ValueError:
+                    parsed_units = None
+
+            existing = existing_by_key.get(key)
+            if existing is not None:
+                cur_units = existing.get("selected_units")
+                cur_selected = _decode_int_list(existing.get("selected_class_nbrs_json"))
+                upd_units = (
+                    parsed_units
+                    if parsed_units is not None and (cur_units is None or float(cur_units) <= 0.0)
+                    else None
+                )
+                upd_selected: Optional[list[int]] = None
+                if not cur_selected:
+                    meta = await self.db.fetch_one(
+                        """
+                        SELECT enroll_groups_json
+                        FROM courses_meta
+                        WHERE roster = ? AND subject = ? AND catalog_nbr = ?
+                        """,
+                        (roster_u, subj, nbr),
+                    )
+                    if meta is not None:
+                        sec_rows = await self.db.fetch_all(
+                            """
+                            SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
+                                   components_required_json, meetings_summary, instructors_summary,
+                                   campus, location, location_descr, instruction_mode, updated_at
+                            FROM roster_sections
+                            WHERE roster = ? AND subject = ? AND catalog_nbr = ?
+                            ORDER BY enroll_group_idx ASC, class_nbr ASC
+                            """,
+                            (roster_u, subj, nbr),
+                        )
+                        raw_egs = orjson.loads(meta["enroll_groups_json"]) if meta.get("enroll_groups_json") else []
+                        norm_egs = normalize_enroll_groups(raw_egs, sec_rows)
+                        default_secs = _pick_default_sections(norm_egs)
+                        if default_secs:
+                            upd_selected = default_secs
+
+                if upd_units is not None or upd_selected is not None:
+                    await self.update_course(
+                        schedule_id=schedule_id,
+                        item_id=int(existing["id"]),
+                        user_id=user_id,
+                        selected_units=upd_units,
+                        selected_class_nbrs=upd_selected,
+                    )
+                    updated.append(code)
+                else:
+                    already_present.append(code)
+                continue
+
+            try:
+                await self.add_course(
+                    schedule_id=schedule_id,
+                    user_id=user_id,
+                    subject=subj,
+                    catalog_nbr=nbr,
+                    enabled=True,
+                    selected_units=parsed_units,
+                    allow_transcript_mutation=True,
+                )
+                added.append(code)
+            except FileExistsError:
+                already_present.append(code)
+            except Exception as exc:
+                skipped.append({"course": code, "reason": str(exc)})
+
+        return {
+            "roster": roster_u,
+            "schedule_id": schedule_id,
+            "schedule_name": sched_name,
+            "added": added,
+            "updated": updated,
+            "already_present": already_present,
+            "skipped": skipped,
+        }
+
     async def update_course(
         self,
         schedule_id: int,
@@ -772,6 +975,10 @@ class SchedulerService:
         sched = await self._get_owned_schedule(schedule_id, user_id)
         if sched is None:
             return None
+        if bool(sched.get("is_transcript")) and enabled is False:
+            raise PermissionError(
+                "Courses on a Transcript schedule cannot be hidden. Duplicate it to a new schedule to toggle courses."
+            )
         item = await self.db.fetch_one(
             "SELECT * FROM schedule_courses WHERE id = ? AND schedule_id = ?",
             (item_id, schedule_id),
@@ -854,6 +1061,10 @@ class SchedulerService:
         sched = await self._get_owned_schedule(schedule_id, user_id)
         if sched is None:
             return None
+        if bool(sched.get("is_transcript")):
+            raise PermissionError(
+                "Courses on a Transcript schedule are locked. Duplicate it to a new schedule to add or remove courses."
+            )
         async with self.db.write_tx() as conn:
             cur = await conn.execute(
                 "DELETE FROM schedule_courses WHERE id = ? AND schedule_id = ?",
@@ -1012,20 +1223,26 @@ class SchedulerService:
         if user is not None:
             cs_index = await self.catalog.get_cs_requirements_index(roster_u)
             satisfied_set, _ = cs_index.expand_satisfied_courses(
-                list(user.get("completed_courses") or []),
+                [
+                    *list(user.get("completed_courses") or []),
+                    *list(user.get("in_progress_courses") or []),
+                ],
                 include_implied=bool(user.get("include_implied_prereqs", True)),
             )
             if user.get("major_mode") == "ilr":
                 ilr_index = await self.catalog.get_ilr_requirements_index(roster_u)
         elif user_id is not None:
             u_row = await self.db.fetch_one(
-                "SELECT completed_courses_json, include_implied_prereqs, major_mode FROM users WHERE id = ?",
+                "SELECT completed_courses_json, in_progress_courses_json, include_implied_prereqs, major_mode FROM users WHERE id = ?",
                 (user_id,),
             )
             if u_row is not None:
                 cs_index = await self.catalog.get_cs_requirements_index(roster_u)
                 satisfied_set, _ = cs_index.expand_satisfied_courses(
-                    _decode_str_list(u_row.get("completed_courses_json")),
+                    [
+                        *_decode_str_list(u_row.get("completed_courses_json")),
+                        *_decode_str_list(u_row.get("in_progress_courses_json")),
+                    ],
                     include_implied=bool(u_row.get("include_implied_prereqs", 1)),
                 )
                 if u_row.get("major_mode") == "ilr":
@@ -1172,6 +1389,7 @@ class SchedulerService:
                 "roster": roster_u,
                 "name": str(sched["name"]),
                 "is_active": bool(sched["is_active"]),
+                "is_transcript": bool(sched.get("is_transcript")),
                 "share_enabled": share_enabled,
                 "share_token": sched["share_token"] if (user_id is not None and share_enabled) else None,
                 "share_url": self._build_share_url(sched["share_token"], share_enabled)

@@ -237,3 +237,43 @@ class UpdateCsChecklistRequest(BaseModel):
     pe_completed: int = Field(default=0, ge=0, le=4)
     slots: dict[str, CsChecklistSlotState] = Field(default_factory=dict, max_length=100)
     sync_completed_courses: Optional[list[str]] = Field(default=None, max_length=200)
+    sync_in_progress_courses: Optional[list[str]] = Field(default=None, max_length=60)
+
+
+class ImportedCompletedCourseItem(BaseModel):
+    course: str = Field(min_length=3, max_length=24)
+    sem: str = Field(default="", max_length=16)
+    gr: str = Field(default="", max_length=12)
+    cr: str = Field(default="", max_length=12)
+
+    @field_validator("course")
+    @classmethod
+    def check_course(cls, v: str) -> str:
+        norm = normalize_course_code(v)
+        if norm is None:
+            raise ValueError(f"Invalid course code: {v}")
+        return norm
+
+
+class ImportedScheduleCourseItem(BaseModel):
+    course: str = Field(min_length=3, max_length=24)
+    roster: str = Field(min_length=3, max_length=10)
+    cr: str = Field(default="", max_length=12)
+
+    @field_validator("course")
+    @classmethod
+    def check_sched_course(cls, v: str) -> str:
+        norm = normalize_course_code(v)
+        if norm is None:
+            raise ValueError(f"Invalid course code: {v}")
+        return norm
+
+
+class ImportTranscriptRequest(BaseModel):
+    roster: Optional[str] = Field(default=None, min_length=3, max_length=10)
+    completed_courses: list[ImportedCompletedCourseItem] = Field(default_factory=list, max_length=200)
+    in_progress_courses: list[ImportedScheduleCourseItem] = Field(default_factory=list, max_length=40)
+    past_schedule_courses: list[ImportedScheduleCourseItem] = Field(default_factory=list, max_length=200)
+    sync_in_progress_to_checklist: bool = True
+    sync_completed_to_scheduler: bool = True
+    pe_completed: Optional[int] = Field(default=None, ge=0, le=4)

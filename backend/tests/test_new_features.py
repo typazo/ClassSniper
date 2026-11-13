@@ -284,18 +284,298 @@ async def test_cs_checklist_cross_roster_and_historical_electives(app_client) ->
     slots = _flatten_checklist_slots(cl.json())
 
     assert slots["core_aiml"]["course"] == "CS 4780"
-    # All 3 CS Electives + 1 Tech Elective filled cleanly across FA26 & uncached historical codes
+    # Fall 2024+ (current) has 2 CS Electives + 1 Project; overflow fills Tech Elective / Major Approved
+    assert "cs_elec_3" not in slots
     filled_elective_courses = {
-        slots["cs_elec_1"]["course"],
-        slots["cs_elec_2"]["course"],
-        slots["cs_elec_3"]["course"],
-        slots["tech_elec_1"]["course"],
+        sl["course"]
+        for k, sl in slots.items()
+        if k.startswith(("cs_elec_", "tech_elec_", "maj_elec_")) and sl["filled"]
     }
     assert filled_elective_courses == {"CS 4700", "CS 5112", "CS 5306", "CS 5470"}
+    assert slots["cs_elec_1"]["filled"] and slots["cs_elec_2"]["filled"]
     # Titles hydrated from FA26 courses_meta even when viewing SP27
     by_course = {sl["course"]: sl for sl in slots.values() if sl["course"]}
     assert by_course["CS 5470"]["title"] == "Systems for Large-Scale ML"
     assert by_course["CS 5306"]["title"] == "Crowdsourcing and Human Computation"
+
+    # Pre-Fall 2024 still exposes 3 CS Electives (+ 1 Project)
+    await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "pre2024",
+            "include_active_schedule": False,
+            "pe_completed": 0,
+            "slots": {},
+        },
+    )
+    cl_pre = await admin.get("/api/cs/checklist", params={"roster": "SP27"})
+    assert cl_pre.status_code == 200
+    pre_slots = _flatten_checklist_slots(cl_pre.json())
+    assert "cs_elec_3" in pre_slots
+    assert pre_slots["cs_elec_1"]["filled"] and pre_slots["cs_elec_2"]["filled"] and pre_slots["cs_elec_3"]["filled"]
+
+
+@pytest.mark.asyncio
+async def test_cs_checklist_slot_swap_heals_stale_title(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+            acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+            components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES (
+            'SP27', 'SPAN', '1230', 1230, 'Continuing Spanish', 'Continuing Spanish',
+            'Intermediate Spanish.', 'UG', 'AS', 92001, '[]', '[]', '["SEM"]',
+            4.0, 4.0, 1, '[]'
+        )
+        """
+    )
+
+    # Auto-filled completed course should NOT leak into manual_slots
+    await admin.put("/api/user/prereqs", json={"completed_courses": ["CS 2110"], "include_implied_prereqs": True})
+    initial = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    assert initial["manual_slots"] == {}
+    assert _flatten_checklist_slots(initial)["intro_cs_2"]["course"] == "CS 2110"
+
+    # Simulate swapping CS 1340 -> SPAN 1230 while stale CS 1340 title was still saved
+    put_res = await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {
+                "maj_elec_1": {
+                    "course": "SPAN 1230",
+                    "title": "Choices and Consequences in Computing",
+                    "cr": "4",
+                }
+            },
+        },
+    )
+    assert put_res.status_code == 200
+    data = put_res.json()
+    slot = _flatten_checklist_slots(data)["maj_elec_1"]
+    assert slot["course"] == "SPAN 1230"
+    assert slot["title"] == "Continuing Spanish"
+    assert list(data["manual_slots"].keys()) == ["maj_elec_1"]
+
+    # Fixed-choice boxes provide quick_options with credits/titles & prereq autocomplete returns cr
+    flat_data = _flatten_checklist_slots(data)
+    core_2800_codes = [opt["code"] for opt in flat_data["core_2800"]["quick_options"]]
+    assert "CS 2800" in core_2800_codes
+    assert "CS 2802" in core_2800_codes
+    opt_span = (await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "1230"})).json()
+    span_entry = next(o for o in opt_span["options"] if o["code"] == "SPAN 1230")
+    assert span_entry["cr"] == "4"
+
+    # Adding directly inside a box with sync_completed_courses updates both slot & Classes I've Taken
+    sync_res = await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {
+                "maj_elec_1": {"course": "SPAN 1230", "cr": "4", "pinned": True, "cleared": False}
+            },
+            "sync_completed_courses": ["CS 2110", "SPAN 1230"],
+        },
+    )
+    assert sync_res.status_code == 200
+    sync_body = sync_res.json()
+    assert "SPAN 1230" in sync_body["completed_courses"]
+    assert _flatten_checklist_slots(sync_body)["maj_elec_1"]["source"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cs_checklist_maximizes_filled_slots_matching(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+            acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+            components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'SP27', 'CS', '5150', 5150, 'Software Engineering', 'Software Engineering',
+            'Software engineering project course.', 'GR', 'EN', 93001, '[]', '[]', '["LEC", "PRJ"]',
+            4.0, 4.0, 1, '[]'
+        ),
+        (
+            'SP27', 'CS', '4701', 4701, 'AI Practicum', 'Practicum in Artificial Intelligence',
+            '2-credit AI practicum.', 'UG', 'EN', 93002, '[]', '[]', '["PRJ"]',
+            2.0, 2.0, 1, '[]'
+        ),
+        (
+            'SP27', 'SPAN', '2090', 2090, 'Intermediate Spanish FWS/Lang', 'FWS: Intermediate Spanish',
+            'Counts for both FWS and LANG in test.', 'UG', 'AS', 93003, '[]', '[]', '["SEM"]',
+            3.0, 3.0, 1, '[{"crseAttr":"DIST","crseAttrValues":"FL-AG"}]'
+        ),
+        (
+            'SP27', 'WRIT', '1420', 1420, 'Writing FWS', 'FWS: Writing Seminar',
+            'Pure FWS.', 'UG', 'AS', 93004, '[]', '[]', '["SEM"]',
+            3.0, 3.0, 1, '[{"crseAttr":"CU","crseAttrValues":"FWS"}]'
+        ),
+        (
+            'SP27', 'WRIT', '1430', 1430, 'Rhetoric FWS', 'FWS: Public Rhetoric',
+            'Pure FWS 2.', 'UG', 'AS', 93009, '[]', '[]', '["SEM"]',
+            3.0, 3.0, 1, '[{"crseAttr":"CU","crseAttrValues":"FWS"}]'
+        ),
+        (
+            'SP27', 'ORIE', '3300', 3300, 'Optimization I', 'Optimization I',
+            'ORIE modeling.', 'UG', 'EN', 93005, '[]', '[]', '["LEC"]',
+            4.0, 4.0, 1, '[]'
+        ),
+        (
+            'SP27', 'ORIE', '3500', 3500, 'Engineering Probability', 'Engineering Probability & Statistics II',
+            'Probability.', 'UG', 'EN', 93006, '[]', '[]', '["LEC"]',
+            4.0, 4.0, 1, '[]'
+        ),
+        (
+            'SP27', 'ORIE', '4150', 4150, 'Service Engineering', 'Data Analytics',
+            'ORIE elective.', 'UG', 'EN', 93007, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'SP27', 'BTRY', '3080', 3080, 'Probability Models', 'Probability Models and Inference',
+            'Probability.', 'UG', 'AG', 93008, '[]', '[]', '["LEC"]',
+            4.0, 4.0, 1, '[]'
+        ),
+        (
+            'SP27', 'SPAN', '1230', 1230, 'Continuing Spanish', 'Continuing Spanish',
+            'Option B intro Spanish.', 'UG', 'AS', 93010, '[]', '[]', '["SEM"]',
+            4.0, 4.0, 1, '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FL-AG)"}]'
+        ),
+        (
+            'SP27', 'SPAN', '2070', 2070, 'Spanish Medical', 'Intermediate Spanish for the Medical Professions',
+            'Option A 2000+ Spanish.', 'UG', 'AS', 93011, '[]', '[]', '["SEM"]',
+            3.0, 3.0, 1, '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FL-AG), (FLOPI-AS)"}]'
+        )
+        """
+    )
+    app.state.catalog._cs_index_cache.pop("SP27", None)
+
+    # 1) CS 4701 (2 cr PRJ) is CS Project ONLY; CS 5150 (4 cr) qualifies for CS Project + CS Elective + Tech Elective
+    cs_idx = await app.state.catalog.get_cs_requirements_index("SP27")
+    assert cs_idx.get("CS", "4701").cs_project is True
+    assert cs_idx.get("CS", "4701").cs_elective is False
+    assert cs_idx.get("CS", "5150").cs_project is True
+    assert cs_idx.get("CS", "5150").cs_elective is True
+
+    # Even with CS 5150 listed BEFORE CS 4701, matching puts CS 4701 -> cs_proj and CS 5150 -> cs_elec_1
+    await admin.put(
+        "/api/user/prereqs",
+        json={"completed_courses": ["CS 5150", "CS 4701"], "include_implied_prereqs": True},
+    )
+    cl1 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots1 = _flatten_checklist_slots(cl1)
+    assert slots1["cs_proj"]["course"] == "CS 4701"
+    assert slots1["cs_elec_1"]["course"] == "CS 5150"
+
+    # 2) Fall 2024+ has 2 CS electives + 1 CS project; remaining CS 4000+ courses overflow to tech_elec while CS 4701 stays in cs_proj
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["CS 5150", "CS 4701", "CS 4700", "CS 4740", "CS 4860"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl2 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots2 = _flatten_checklist_slots(cl2)
+    assert slots2["cs_proj"]["course"] == "CS 4701"
+    assert "cs_elec_3" not in slots2
+    cs_elecs = {slots2[f"cs_elec_{i}"]["course"] for i in range(1, 3)}
+    assert len(cs_elecs) == 2
+    tech_elecs = {slots2[f"tech_elec_{i}"]["course"] for i in range(1, 4) if slots2[f"tech_elec_{i}"]["filled"]}
+    assert "CS 5150" in (cs_elecs | tech_elecs)
+    assert slots2["tech_elec_1"]["filled"] is True
+
+    # 3) A&S FWS vs LANG matching (Option A 2000+ in Lang 3 waives Lang 1 & 2) + Eng Math4 vs ORIE Ext Spec
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["SPAN 2090", "WRIT 1420", "WRIT 1430", "ORIE 3500", "ORIE 3300", "ORIE 4150", "BTRY 3080"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl3 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots3 = _flatten_checklist_slots(cl3)
+    # SPAN 2090 satisfies Option A in Lang 3, freeing WRIT 1420 + WRIT 1430 for FWS 1 & FWS 2, and waiving Lang 1 & 2
+    assert {slots3["as_fws_1"]["course"], slots3["as_fws_2"]["course"]} == {"WRIT 1420", "WRIT 1430"}
+    assert slots3["as_lang_3"]["course"] == "SPAN 2090"
+    assert slots3["as_lang_1"]["source"] == "waived"
+    assert slots3["as_lang_1"]["waived"] is True
+    assert slots3["as_lang_2"]["source"] == "waived"
+    assert slots3["as_lang_2"]["waived"] is True
+    assert slots3["as_lang_2"]["waived_by"] == "SPAN 2090"
+
+    # Switch to Engineering: ORIE 3300/3500/4150 should fill all 3 ext_spec slots while BTRY 3080 fills eng_math_4
+    eng_res = await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "engineering",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {},
+        },
+    )
+    assert eng_res.status_code == 200
+    eng_slots = _flatten_checklist_slots(eng_res.json())
+    assert eng_slots["eng_math_4"]["course"] == "BTRY 3080"
+    assert {eng_slots[f"ext_spec_{i}"]["course"] for i in range(1, 4)} == {
+        "ORIE 3300",
+        "ORIE 3500",
+        "ORIE 4150",
+    }
+
+    # Switch back to A&S: Taking BOTH SPAN 1230 + SPAN 2070 uses ONLY SPAN 2070 in Lang 3 and greys out Lang 1 & Lang 2
+    await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {},
+            "sync_completed_courses": ["SPAN 1230", "SPAN 2070"],
+        },
+    )
+    cl_opt_a = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots_opt_a = _flatten_checklist_slots(cl_opt_a)
+    assert slots_opt_a["as_lang_3"]["course"] == "SPAN 2070"
+    assert slots_opt_a["as_lang_1"]["waived"] is True
+    assert slots_opt_a["as_lang_1"]["waived_by"] == "SPAN 2070"
+    assert slots_opt_a["as_lang_2"]["waived"] is True
+    assert slots_opt_a["as_lang_2"]["waived_by"] == "SPAN 2070"
+
+    # Only SPAN 1230 (< 2000) fills Lang 1 normally without waiving
+    await admin.put(
+        "/api/user/prereqs",
+        json={"completed_courses": ["SPAN 1230"], "include_implied_prereqs": True},
+    )
+    cl_opt_b = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots_opt_b = _flatten_checklist_slots(cl_opt_b)
+    assert slots_opt_b["as_lang_1"]["course"] == "SPAN 1230"
+    assert slots_opt_b["as_lang_1"].get("waived") is not True
+    assert slots_opt_b["as_lang_3"]["filled"] is False
 
 
 @pytest.mark.asyncio
@@ -308,7 +588,9 @@ async def test_batch_load_schedule_insights(app_client) -> None:
 
     calls: list[tuple[str, str, str]] = []
 
-    async def fake_get_course_insights(roster: str, subject: str, catalog_nbr: str, force: bool = False):
+    async def fake_get_course_insights(
+        roster: str, subject: str, catalog_nbr: str, force_refresh: bool = False
+    ):
         calls.append((roster, subject, catalog_nbr))
         await app.state.db.execute(
             """
@@ -447,3 +729,786 @@ async def test_pick_one_watch_group_and_multi_window_history(app_client) -> None
     assert hist["events"][0]["new_status"] == "O"
     assert hist["events"][1]["new_status"] == "C"
     assert hist["events"][2]["new_status"] == "O"
+
+
+@pytest.mark.asyncio
+async def test_as_distribution_unique_courses_and_historical_lookup(app_client, fake_provider) -> None:
+    from app.providers.base import CourseRecord, RosterRecord, SectionRecord
+
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    # Seed SP27 courses: CS 1340 covers BOTH ETM-AS & SDS-AS; CS 3780 covers SDS-AS
+    await app.state.db.execute(
+        """
+        INSERT OR REPLACE INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long,
+            description, acad_career, acad_group, crse_id, enroll_groups_json,
+            crosslists_json, components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'SP27', 'CS', '1340', 1340, 'Choices & Consequences', 'Choices and Consequences in Computing',
+            'Ethics and data.', 'UG', 'AS', 94001, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[{"crseAttrValues":"(ETM-AS), (SDS-AS)"}]'
+        ),
+        (
+            'SP27', 'CS', '3780', 3780, 'Machine Learning', 'Introduction to Machine Learning',
+            'ML.', 'UG', 'EN', 94002, '[]', '[]', '["LEC"]',
+            4.0, 4.0, 1, '[{"crseAttrValues":"(SDS-AS)"}]'
+        ),
+        (
+            'SP27', 'BIOMI', '1100', 1100, 'Locker Rooms Microbes', 'Locker Rooms, Kitchens and Bedrooms',
+            'Bio.', 'UG', 'AS', 94003, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[{"crseAttrValues":"(BIO-AS)"}]'
+        ),
+        (
+            'SP27', 'CS', '2800', 2800, 'Discrete Structures', 'Discrete Structures',
+            'Math/CS.', 'UG', 'EN', 94004, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[{"crseAttrValues":"(SMR-AS)"}]'
+        )
+        """
+    )
+    await app.state.db.execute(
+        """
+        INSERT INTO subjects (roster, value, descr, synced_at)
+        VALUES ('SP27', 'HIST', 'History', datetime('now'))
+        ON CONFLICT(roster, value) DO UPDATE SET synced_at = datetime('now')
+        """
+    )
+
+    # Also add older Fall/Spring rosters and put HIST 2640 only in FA26 (not SP27)
+    fake_provider.rosters = [
+        RosterRecord(slug="SP27", descr="Spring 2027", is_default=True, archive_mode=False, strm="2951"),
+        RosterRecord(slug="FA26", descr="Fall 2026", is_default=False, archive_mode=True, strm="2937"),
+        RosterRecord(slug="SP26", descr="Spring 2026", is_default=False, archive_mode=True, strm="2923"),
+        RosterRecord(slug="FA25", descr="Fall 2025", is_default=False, archive_mode=True, strm="2909"),
+    ]
+    fake_provider.courses_by_bucket[("FA26", "HIST")] = [
+        CourseRecord(
+            roster="FA26",
+            subject="HIST",
+            catalog_nbr="2640",
+            title_short="History of Science",
+            title_long="Introduction to the History of Science",
+            description="History of science.",
+            crse_id=94005,
+            acad_career="UG",
+            acad_group="AS",
+            enroll_groups=[{"componentsRequired": ["LEC"], "unitsMinimum": 4, "unitsMaximum": 4}],
+            crse_attrs=[{"attrDescr": "Distribution Requirements", "crseAttrValues": "(HIST-AS), (HA-AS), (SCD-AS)"}],
+            sections=[
+                SectionRecord(
+                    class_nbr=9901,
+                    enroll_group_idx=0,
+                    ssr_component="LEC",
+                    section="001",
+                    open_status="C",
+                    components_required=["LEC"],
+                    meetings_summary="TR 11:40AM-12:55PM",
+                    instructors_summary="Staff",
+                )
+            ],
+        )
+    ]
+
+    # Put CS 1340, CS 3780, BIOMI 1100, CS 2800 + uncached HIST 2640 into completed courses
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["BIOMI 1100", "CS 1340", "CS 2800", "CS 3780", "HIST 2640"],
+            "include_implied_prereqs": True,
+        },
+    )
+
+    cl1 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots1 = _flatten_checklist_slots(cl1)
+    # CS 1340 fills ETM-AS and CS 3780 fills SDS-AS -> 4 unique courses instead of reusing CS 1340
+    assert slots1["as_dist_etm_as"]["course"] == "CS 1340"
+    assert slots1["as_dist_sds_as"]["course"] == "CS 3780"
+    assert cl1["as_distribution_summary"]["covered_categories"] == 4
+    assert cl1["as_distribution_summary"]["unique_courses"] == 4
+    assert cl1["missing_metadata_courses"] == ["HIST 2640"]
+
+    # Polite historical lookup resolves HIST 2640 from FA26 without touching already-synced SP27
+    lookup_res = await app.state.catalog.process_historical_course_lookup()
+    assert "HIST 2640" in lookup_res["resolved"]
+    assert lookup_res["synced_buckets"] == 1
+
+    # Checklist now automatically populates HIST-AS and SCD-AS from HIST 2640
+    cl2 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots2 = _flatten_checklist_slots(cl2)
+    assert cl2["missing_metadata_courses"] == []
+    assert slots2["as_dist_hist_as"]["course"] == "HIST 2640"
+    assert slots2["as_dist_scd_as"]["course"] == "HIST 2640"
+    assert cl2["as_distribution_summary"]["covered_categories"] == 6
+    assert cl2["as_distribution_summary"]["unique_courses"] == 5
+
+    # Without CS 3780, double-counting still fills BOTH ETM-AS and SDS-AS using CS 1340
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["CS 1340"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl3 = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots3 = _flatten_checklist_slots(cl3)
+    assert slots3["as_dist_etm_as"]["course"] == "CS 1340"
+    assert slots3["as_dist_sds_as"]["course"] == "CS 1340"
+    assert cl3["as_distribution_summary"]["covered_categories"] == 2
+    assert cl3["as_distribution_summary"]["unique_courses"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ap_transcript_equivalents_fws_and_prereq_options(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    # Searching 'AP Lit' and 'AP Stats' surfaces non-roster transcript credit equivalents
+    ap_lit_opts = (
+        await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "AP Lit"})
+    ).json()["options"]
+    assert any(o["code"] == "ENGL 1100F" and o["cr"] == "3" for o in ap_lit_opts)
+
+    ap_stat_opts = (
+        await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "AP Stats"})
+    ).json()["options"]
+    assert any(o["code"] == "MATH 1710" and o["cr"] == "4" for o in ap_stat_opts)
+
+    ap_bio_opts = (
+        await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "AP Bio"})
+    ).json()["options"]
+    assert {o["code"] for o in ap_bio_opts} >= {"BIOG 1101F", "BIOG 1102F"}
+
+    ap_span_opts = (
+        await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "AP Spanish"})
+    ).json()["options"]
+    assert any(o["code"] == "SPAN 1100C" and o["cr"] == "3" for o in ap_span_opts)
+
+    # Adding ENGL 1100F, MATH 1710 & BIOG 1102F fills one FWS box without queueing historical lookups
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["BIOG 1102F", "ENGL 1100F", "MATH 1710"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl_as = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    assert cl_as["missing_metadata_courses"] == []
+    assert app.state.catalog._historical_lookup_queued == set()
+    slots_as = _flatten_checklist_slots(cl_as)
+    assert slots_as["as_fws_1"]["course"] == "ENGL 1100F"
+    assert slots_as["as_fws_1"]["cr"] == "3"
+    assert "AP Lit" in slots_as["as_fws_1"]["title"]
+    assert any(q["code"] == "ENGL 1100F" for q in slots_as["as_fws_1"].get("quick_options", []))
+    assert slots_as["as_fws_2"]["filled"] is False
+
+    # Engineering checklist also recognizes ENGL 1100F in FWS 1 only
+    cl_eng = (
+        await admin.put(
+            "/api/cs/checklist",
+            params={"roster": "SP27"},
+            json={
+                "college": "engineering",
+                "curriculum": "current",
+                "include_active_schedule": True,
+                "pe_completed": 0,
+                "slots": {},
+            },
+        )
+    ).json()
+    slots_eng = _flatten_checklist_slots(cl_eng)
+    assert slots_eng["eng_fws_1"]["course"] == "ENGL 1100F"
+    assert slots_eng["eng_fws_2"]["filled"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_spec_soft_related_depts_warning_and_same_dept_preference(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    await app.state.db.execute(
+        """
+        INSERT OR REPLACE INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long,
+            description, acad_career, acad_group, crse_id, enroll_groups_json,
+            crosslists_json, components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'SP27', 'PSYCH', '3420', 3420, 'Human Perception', 'Human Perception',
+            'Perception.', 'UG', 'AS', 95001, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'SP27', 'PSYCH', '3140', 3140, 'Computational Psychology', 'Computational Psychology',
+            'Comp psych.', 'UG', 'AS', 95002, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'SP27', 'PSYCH', '3800', 3800, 'Social Cognition', 'Social Cognition',
+            'Cognition.', 'UG', 'AS', 95003, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'SP27', 'COGST', '3100', 3100, 'Intro to CogSci Research', 'Intro to CogSci Research',
+            'CogSci.', 'UG', 'AS', 95004, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'SP27', 'INFO', '3450', 3450, 'Human-Computer Interaction', 'Human-Computer Interaction Design',
+            'HCI.', 'UG', 'AS', 95005, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        )
+        """
+    )
+    app.state.catalog._cs_index_cache.pop("SP27", None)
+
+    # 1) Mixed closely related departments (PSYCH + COGST + INFO) soft-fills all 3 with advising warning
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["PSYCH 3420", "COGST 3100", "INFO 3450"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl_mixed = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots_mixed = _flatten_checklist_slots(cl_mixed)
+    assert {slots_mixed[f"ext_spec_{i}"]["course"] for i in range(1, 4)} == {
+        "PSYCH 3420",
+        "COGST 3100",
+        "INFO 3450",
+    }
+    for i in range(1, 4):
+        assert "Assistant Director, Undergraduate Advising" in slots_mixed[f"ext_spec_{i}"].get("warning", "")
+
+    # 2) When 3 same-department PSYCH courses are available alongside COGST/INFO, same-dept wins with NO warning
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["PSYCH 3420", "PSYCH 3140", "PSYCH 3800", "COGST 3100", "INFO 3450"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl_same = (await admin.get("/api/cs/checklist", params={"roster": "SP27"})).json()
+    slots_same = _flatten_checklist_slots(cl_same)
+    assert {slots_same[f"ext_spec_{i}"]["course"] for i in range(1, 4)} == {
+        "PSYCH 3420",
+        "PSYCH 3140",
+        "PSYCH 3800",
+    }
+    for i in range(1, 4):
+        assert not slots_same[f"ext_spec_{i}"].get("warning")
+
+
+@pytest.mark.asyncio
+async def test_transcript_import_grades_enrichment_and_scheduler_sync(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO rosters (slug, descr, is_default, archive_mode, strm, updated_at)
+        VALUES ('FA26', 'Fall 2026', 0, 0, '2935', datetime('now'))
+        """
+    )
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO subjects (roster, value, descr, synced_at)
+        VALUES ('FA26', 'CS', 'Computer Science', datetime('now'))
+        """
+    )
+    eg_3780 = json.dumps(
+        [{"classSections": [{"classNbr": 10101, "section": "001", "ssrComponent": "LEC", "openStatus": "O", "meetings": []}]}]
+    )
+    eg_4820 = json.dumps(
+        [{"classSections": [{"classNbr": 10202, "section": "001", "ssrComponent": "LEC", "openStatus": "O", "meetings": []}]}]
+    )
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long,
+            description, acad_career, acad_group, crse_id, enroll_groups_json,
+            crosslists_json, components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'FA26', 'CS', '3780', 3780, 'Intro Machine Learning', 'Introduction to Machine Learning',
+            'ML.', 'UG', 'EN', 96001, ?, '[]', '["LEC"]', 4.0, 4.0, 1, '[]'
+        ),
+        (
+            'FA26', 'CS', '4820', 4820, 'Intro Analysis Algorithms', 'Introduction to Analysis of Algorithms',
+            'Algorithms.', 'UG', 'EN', 96002, ?, '[]', '["LEC"]', 4.0, 4.0, 1, '[]'
+        )
+        """,
+        (eg_3780, eg_4820),
+    )
+
+    # Pre-seed already-added user state:
+    # - Completed courses: CS 2110 (no details), CS 2800 (pinned manual slot w/ custom notes & empty gr/sem), MATH 1110 (keep intact)
+    # - FA26 active schedule already has CS 3780 with custom color_idx=7, locked section [10101], selected_units=0 (missing)
+    await admin.put(
+        "/api/user/prereqs",
+        json={"completed_courses": ["CS 2110", "CS 2800", "MATH 1110"], "include_implied_prereqs": True},
+    )
+    await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 1,
+            "slots": {
+                "core_2800": {
+                    "course": "CS 2800",
+                    "title": "",
+                    "cr": "",
+                    "sem": "Done",
+                    "gr": "",
+                    "notes": "Keep my custom note",
+                    "pinned": True,
+                    "cleared": False,
+                }
+            },
+        },
+    )
+    fa26_list = (await admin.get("/api/schedules", params={"roster": "FA26"})).json()
+    fa26_sched_id = fa26_list["active"]["schedule"]["id"]
+    await admin.post(
+        f"/api/schedules/{fa26_sched_id}/courses",
+        json={
+            "subject": "CS",
+            "catalog_nbr": "3780",
+            "enabled": False,
+            "selected_units": 0.0,
+            "selected_class_nbrs": [10101],
+            "locked_class_nbrs": [10101],
+            "color_idx": 7,
+        },
+    )
+
+    # Import transcript payload (sanitized courses + grades + in-progress FA26 courses)
+    imp_res = await admin.post(
+        "/api/cs/checklist/import-transcript",
+        json={
+            "roster": "SP27",
+            "completed_courses": [
+                {"course": "CS 2110", "sem": "FA24", "gr": "A", "cr": "4"},
+                {"course": "CS 2800", "sem": "SP25", "gr": "A-", "cr": "4"},
+                {"course": "CS 3110", "sem": "FA25", "gr": "B+", "cr": "4"},
+                {"course": "CS 2110", "sem": "FA24", "gr": "A", "cr": "4"},  # duplicate in payload ignored
+            ],
+            "in_progress_courses": [
+                {"course": "CS 3780", "roster": "FA26", "cr": "4"},
+                {"course": "CS 4820", "roster": "FA26", "cr": "4"},
+                {"course": "CS 3780", "roster": "FA26", "cr": "4"},  # duplicate in payload ignored
+            ],
+            "pe_completed": 2,
+        },
+    )
+    assert imp_res.status_code == 200
+    body = imp_res.json()
+    cl = body["checklist"]
+    summary = body["import_summary"]
+
+    # Completed union preserves MATH 1110, adds CS 3110, enriches CS 2110 & CS 2800 without duplicates
+    assert cl["completed_courses"] == ["CS 2110", "CS 2800", "CS 3110", "MATH 1110"]
+    assert summary["added_completed"] == ["CS 3110"]
+    assert set(summary["enriched_completed"]) == {"CS 2110", "CS 2800"}
+    assert cl["pe_completed"] == 2
+    assert cl["completed_course_details"]["CS 2110"] == {"gr": "A", "sem": "FA24", "cr": "4"}
+    assert cl["completed_course_details"]["CS 3110"] == {"gr": "B+", "sem": "FA25", "cr": "4"}
+
+    slots = _flatten_checklist_slots(cl)
+    assert slots["intro_cs_2"]["course"] == "CS 2110"
+    assert slots["intro_cs_2"]["gr"] == "A"
+    assert slots["intro_cs_2"]["sem"] == "FA24"
+    assert slots["intro_cs_2"]["cr"] == "4"
+    # Manual slot preserves user's custom notes while upgrading placeholder "Done" & empty gr/cr
+    assert slots["core_2800"]["notes"] == "Keep my custom note"
+    assert slots["core_2800"]["gr"] == "A-"
+    assert slots["core_2800"]["sem"] == "SP25"
+    assert slots["core_2800"]["cr"] == "4"
+    assert slots["core_3110"]["gr"] == "B+"
+    assert slots["core_3110"]["sem"] == "FA25"
+
+    # Re-auto-fill (clearing manual slots) keeps imported grades/terms attached to completed courses
+    cl_reset = (
+        await admin.put(
+            "/api/cs/checklist",
+            params={"roster": "SP27"},
+            json={
+                "college": "arts",
+                "curriculum": "current",
+                "include_active_schedule": True,
+                "pe_completed": 2,
+                "slots": {},
+            },
+        )
+    ).json()
+    reset_slots = _flatten_checklist_slots(cl_reset)
+    assert reset_slots["intro_cs_2"]["gr"] == "A"
+    assert reset_slots["core_2800"]["gr"] == "A-"
+    assert reset_slots["core_2800"]["sem"] == "SP25"
+
+    # Scheduler FA26 syncs into dedicated Transcript schedule while leaving custom Main Schedule untouched
+    fa26_sched_res = summary["scheduler"][0]
+    assert fa26_sched_res["roster"] == "FA26"
+    assert fa26_sched_res["schedule_name"] == "Transcript"
+    assert set(fa26_sched_res["added"]) == {"CS 3780", "CS 4820"}
+
+    fa26_after = (await admin.get("/api/schedules", params={"roster": "FA26"})).json()
+    assert fa26_after["active"]["schedule"]["name"] == "Transcript"
+    assert fa26_after["active"]["schedule"]["is_transcript"] is True
+    courses_by_code = {f"{c['subject']} {c['catalog_nbr']}": c for c in fa26_after["active"]["courses"]}
+    assert set(courses_by_code.keys()) == {"CS 3780", "CS 4820"}
+    assert courses_by_code["CS 3780"]["enabled"] is True
+    assert courses_by_code["CS 3780"]["selected_units"] == 4.0
+    assert courses_by_code["CS 4820"]["enabled"] is True
+    assert courses_by_code["CS 4820"]["selected_units"] == 4.0
+
+    # Original Main Schedule keeps its manual edits untouched
+    main_sched_after = (await admin.get(f"/api/schedules/{fa26_sched_id}")).json()
+    assert len(main_sched_after["courses"]) == 1
+    assert main_sched_after["courses"][0]["color_idx"] == 7
+    assert main_sched_after["courses"][0]["locked_class_nbrs"] == [10101]
+    assert main_sched_after["courses"][0]["enabled"] is False
+
+    # Re-importing the exact same transcript is idempotent (no duplicates, keeps everything unchanged)
+    imp_again = (
+        await admin.post(
+            "/api/cs/checklist/import-transcript",
+            json={
+                "roster": "SP27",
+                "completed_courses": [
+                    {"course": "CS 2110", "sem": "FA24", "gr": "A", "cr": "4"},
+                ],
+                "in_progress_courses": [
+                    {"course": "CS 3780", "roster": "FA26", "cr": "4"},
+                    {"course": "CS 4820", "roster": "FA26", "cr": "4"},
+                ],
+            },
+        )
+    ).json()
+    assert imp_again["import_summary"]["added_completed"] == []
+    assert imp_again["import_summary"]["added_in_progress"] == []
+    assert imp_again["import_summary"]["enriched_completed"] == []
+    assert imp_again["import_summary"]["scheduler"][0]["added"] == []
+    assert set(imp_again["import_summary"]["scheduler"][0]["already_present"]) == {"CS 3780", "CS 4820"}
+
+    # Imported FA26 courses also populate Currently Taking boxes on SP27 checklist
+    assert cl["in_progress_courses"] == ["CS 3780", "CS 4820"]
+    assert summary["added_in_progress"] == ["CS 3780", "CS 4820"]
+    assert slots["core_aiml"]["source"] == "in_progress"
+    assert slots["core_aiml"]["sem"] == "FA26"
+    assert slots["core_4820"]["source"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_cs_checklist_currently_taking_category_and_promotion(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    # Seed SP27 CS 5306 & CS 4780 plus next-term course requiring CS 4820
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+            acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+            components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'FA26', 'CS', '5306', 5306, 'Crowdsourcing & Human Comp', 'Crowdsourcing and Human Computation',
+            'Human-in-the-loop systems.', 'GR', 'EN', 94001, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        )
+        """
+    )
+    # Completed: CS 4700; Currently Taking: CS 5306; What-If SP27 Schedule: MATH 2940
+    await admin.put(
+        "/api/user/prereqs",
+        json={"completed_courses": ["CS 4700"], "include_implied_prereqs": True},
+    )
+    await admin.post(
+        "/api/schedules/quick-add",
+        json={"roster": "SP27", "subject": "MATH", "catalog_nbr": "2940"},
+    )
+
+    res = await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {},
+            "sync_in_progress_courses": ["CS 5306", "CS 4820"],
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["in_progress_courses"] == ["CS 4820", "CS 5306"]
+    slots = _flatten_checklist_slots(body)
+
+    # CS 4820 fills core_4820 as in_progress, CS 5306 fills a CS Elective as in_progress
+    assert slots["core_4820"]["course"] == "CS 4820"
+    assert slots["core_4820"]["source"] == "in_progress"
+    assert slots["core_4820"]["sem"] == "Taking"
+    elec_by_course = {
+        slots[f"cs_elec_{i}"]["course"]: slots[f"cs_elec_{i}"] for i in (1, 2) if slots[f"cs_elec_{i}"]["filled"]
+    }
+    assert elec_by_course["CS 4700"]["source"] == "completed"
+    assert elec_by_course["CS 5306"]["source"] == "in_progress"
+    assert elec_by_course["CS 5306"]["title"] == "Crowdsourcing and Human Computation"
+    assert slots["math_linalg"]["course"] == "MATH 2940"
+    assert slots["math_linalg"]["source"] == "schedule"
+
+    assert body["summary"]["in_progress_slots"] == 2
+    assert body["summary"]["completed_slots"] >= 1
+    assert body["summary"]["whatif_slots"] >= 1
+
+    # Promote CS 5306 from Currently Taking -> Completed (with grade)
+    promoted = await admin.put(
+        "/api/cs/checklist",
+        params={"roster": "SP27"},
+        json={
+            "college": "arts",
+            "curriculum": "current",
+            "include_active_schedule": True,
+            "pe_completed": 0,
+            "slots": {},
+            "sync_completed_courses": ["CS 4700", "CS 5306"],
+            "sync_in_progress_courses": ["CS 4820"],
+        },
+    )
+    assert promoted.status_code == 200
+    p_body = promoted.json()
+    assert p_body["completed_courses"] == ["CS 4700", "CS 5306"]
+    assert p_body["in_progress_courses"] == ["CS 4820"]
+    p_slots = _flatten_checklist_slots(p_body)
+    p_by_course = {sl["course"]: sl for sl in p_slots.values() if sl["course"]}
+    assert p_by_course["CS 5306"]["source"] == "completed"
+    assert p_by_course["CS 4820"]["source"] == "in_progress"
+    assert p_body["summary"]["in_progress_slots"] == 1
+
+
+@pytest.mark.asyncio
+async def test_transcript_import_past_semesters_sync_to_scheduler(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO rosters (slug, descr, is_default, archive_mode, strm, updated_at)
+        VALUES
+            ('FA24', 'Fall 2024', 0, 1, '2879', datetime('now')),
+            ('SP25', 'Spring 2025', 0, 1, '2893', datetime('now'))
+        """
+    )
+    for roster_slug, subj, nbr, cid, title in (
+        ("FA24", "CS", "1110", 95001, "Intro to Computing: Python"),
+        ("SP25", "CS", "2110", 95002, "OO Programming & Data Structures"),
+        ("FA26", "CS", "5306", 95003, "Crowdsourcing and Human Computation"),
+    ):
+        await db.execute(
+            """
+            INSERT INTO subjects (roster, value, descr, synced_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(roster, value) DO UPDATE SET synced_at = datetime('now')
+            """,
+            (roster_slug, subj, subj),
+        )
+        await db.execute(
+            """
+            INSERT INTO courses_meta (
+                roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+                acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+                components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+            ) VALUES (?, ?, ?, ?, ?, ?, '', 'UG', 'EN', ?, '[]', '[]', '["LEC"]', 4.0, 4.0, 1, '[]')
+            """,
+            (roster_slug, subj, nbr, int(nbr), title, title, cid),
+        )
+
+    res = await admin.post(
+        "/api/cs/checklist/import-transcript",
+        json={
+            "roster": "SP27",
+            "completed_courses": [
+                {"course": "MATH 1110", "sem": "AP FA24", "gr": "S", "cr": "4"},
+                {"course": "CS 2110", "sem": "SP25", "gr": "A-", "cr": "4"},
+                {"course": "CS 1110", "sem": "FA24", "gr": "A", "cr": "4"},
+            ],
+            "in_progress_courses": [
+                {"course": "CS 5306", "roster": "FA26", "cr": "3"},
+            ],
+            "sync_completed_to_scheduler": True,
+        },
+    )
+    assert res.status_code == 200
+    sched_results = res.json()["import_summary"]["scheduler"]
+    # Synced chronologically: FA24, SP25, FA26 (and AP credits are NOT turned into a schedule)
+    assert [s["roster"] for s in sched_results] == ["FA24", "SP25", "FA26"]
+    assert sched_results[0]["added"] == ["CS 1110"]
+    assert sched_results[1]["added"] == ["CS 2110"]
+    assert sched_results[2]["added"] == ["CS 5306"]
+
+    fa24 = (await admin.get("/api/schedules", params={"roster": "FA24"})).json()
+    sp25 = (await admin.get("/api/schedules", params={"roster": "SP25"})).json()
+    assert fa24["active"]["schedule"]["name"] == "Transcript"
+    assert fa24["active"]["schedule"]["is_transcript"] is True
+    assert sp25["active"]["schedule"]["is_transcript"] is True
+    assert [f"{c['subject']} {c['catalog_nbr']}" for c in fa24["active"]["courses"]] == ["CS 1110"]
+    assert [f"{c['subject']} {c['catalog_nbr']}" for c in sp25["active"]["courses"]] == ["CS 2110"]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_transcript_schedule_locked_and_duplicatable(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    await db.execute(
+        """
+        INSERT INTO subjects (roster, value, descr, synced_at)
+        VALUES ('FA26', 'CS', 'CS', datetime('now')), ('FA26', 'MATH', 'MATH', datetime('now'))
+        ON CONFLICT(roster, value) DO UPDATE SET synced_at = datetime('now')
+        """
+    )
+    enroll_groups_cs = [
+        {
+            "enrollGroup": 0,
+            "unitsMinimum": 3.0,
+            "unitsMaximum": 4.0,
+            "classSections": [
+                {
+                    "classNbr": 30101,
+                    "ssrComponent": "LEC",
+                    "section": "001",
+                    "openStatus": "O",
+                    "campus": "MAIN",
+                    "location": "ITH",
+                    "meetings": [{"pattern": "MWF", "timeStart": "10:10AM", "timeEnd": "11:00AM"}],
+                },
+                {
+                    "classNbr": 30102,
+                    "ssrComponent": "DIS",
+                    "section": "201",
+                    "openStatus": "O",
+                    "campus": "MAIN",
+                    "location": "ITH",
+                    "meetings": [{"pattern": "T", "timeStart": "01:25PM", "timeEnd": "02:15PM"}],
+                },
+                {
+                    "classNbr": 30103,
+                    "ssrComponent": "DIS",
+                    "section": "202",
+                    "openStatus": "C",
+                    "campus": "MAIN",
+                    "location": "ITH",
+                    "meetings": [{"pattern": "R", "timeStart": "02:55PM", "timeEnd": "03:45PM"}],
+                },
+            ],
+        }
+    ]
+    import orjson as _orjson
+
+    await db.execute(
+        """
+        INSERT INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+            acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+            components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        ('FA26', 'CS', '3110', 3110, 'Functional Prog', 'Functional Programming', '', 'UG', 'EN', 96001, ?, '[]', '["LEC","DIS"]', 3.0, 4.0, 1, '[]'),
+        ('FA26', 'MATH', '2940', 2940, 'Linear Algebra', 'Linear Algebra', '', 'UG', 'AS', 96002, '[]', '[]', '["LEC"]', 4.0, 4.0, 1, '[]')
+        """,
+        (_orjson.dumps(enroll_groups_cs).decode(),),
+    )
+
+    # Custom active schedule has a non-transcript course (MATH 2940) -> importing must keep it active & untouched
+    fa26_init = (await admin.get("/api/schedules", params={"roster": "FA26"})).json()
+    custom_id = fa26_init["active"]["schedule"]["id"]
+    await admin.post(f"/api/schedules/{custom_id}/courses", json={"subject": "MATH", "catalog_nbr": "2940"})
+
+    imp_res = await admin.post(
+        "/api/cs/checklist/import-transcript",
+        json={
+            "roster": "SP27",
+            "in_progress_courses": [{"course": "CS 3110", "roster": "FA26", "cr": ""}],
+        },
+    )
+    assert imp_res.status_code == 200
+    assert imp_res.json()["import_summary"]["scheduler"][0]["schedule_name"] == "Transcript"
+
+    fa26_list = (await admin.get("/api/schedules", params={"roster": "FA26"})).json()
+    # Custom Main Schedule stayed active because it had non-transcript course MATH 2940
+    assert fa26_list["active"]["schedule"]["id"] == custom_id
+    assert [c["subject"] for c in fa26_list["active"]["courses"]] == ["MATH"]
+
+    transcript_meta = next(s for s in fa26_list["schedules"] if s["is_transcript"])
+    t_id = transcript_meta["id"]
+    t_sched = (await admin.get(f"/api/schedules/{t_id}")).json()
+    assert t_sched["schedule"]["is_transcript"] is True
+    assert len(t_sched["courses"]) == 1
+    item_id = t_sched["courses"][0]["id"]
+
+    # Force selected_units to 0 & color_idx to 5, then re-import with cr="4" to verify enrichment on Transcript schedule
+    await db.execute("UPDATE schedule_courses SET selected_units = 0.0, color_idx = 5 WHERE id = ?", (item_id,))
+    imp_enrich = await admin.post(
+        "/api/cs/checklist/import-transcript",
+        json={
+            "roster": "SP27",
+            "in_progress_courses": [{"course": "CS 3110", "roster": "FA26", "cr": "4"}],
+        },
+    )
+    assert imp_enrich.status_code == 200
+    assert imp_enrich.json()["import_summary"]["scheduler"][0]["updated"] == ["CS 3110"]
+    t_enriched = (await admin.get(f"/api/schedules/{t_id}")).json()
+    assert t_enriched["courses"][0]["selected_units"] == 4.0
+    assert t_enriched["courses"][0]["color_idx"] == 5
+
+    # Locked membership & rename on Transcript schedule -> 403 Forbidden
+    assert (await admin.post(f"/api/schedules/{t_id}/courses", json={"subject": "MATH", "catalog_nbr": "2940"})).status_code == 403
+    assert (await admin.delete(f"/api/schedules/{t_id}/courses/{item_id}")).status_code == 403
+    assert (await admin.patch(f"/api/schedules/{t_id}/courses/{item_id}", json={"enabled": False})).status_code == 403
+    assert (await admin.patch(f"/api/schedules/{t_id}", json={"name": "Renamed"})).status_code == 403
+
+    # Activate Transcript -> quick-add also returns 403 cleanly
+    await admin.patch(f"/api/schedules/{t_id}", json={"is_active": True})
+    assert (await admin.post("/api/schedules/quick-add", json={"roster": "FA26", "subject": "MATH", "catalog_nbr": "2940"})).status_code == 403
+
+    # Section swap, lock pin, Auto-Generate apply, and busy blocks STILL work on Transcript!
+    swap_res = await admin.patch(
+        f"/api/schedules/{t_id}/courses/{item_id}",
+        json={"selected_class_nbrs": [30101, 30103], "locked_class_nbrs": [30101]},
+    )
+    assert swap_res.status_code == 200
+    assert swap_res.json()["courses"][0]["selected_class_nbrs"] == [30101, 30103]
+    assert swap_res.json()["courses"][0]["locked_class_nbrs"] == [30101]
+
+    gen_res = await admin.put(
+        f"/api/schedules/{t_id}/apply-generated",
+        json={"items": [{"item_id": item_id, "selected_class_nbrs": [30101, 30102]}]},
+    )
+    assert gen_res.status_code == 200
+    assert gen_res.json()["courses"][0]["selected_class_nbrs"] == [30101, 30102]
+
+    blk_res = await admin.post(
+        f"/api/schedules/{t_id}/blocks",
+        json={"label": "Club", "days": ["F"], "start_min": 900, "end_min": 960},
+    )
+    assert blk_res.status_code == 201
+
+    # Duplicating Transcript creates an unrestricted editable plan
+    dup_res = await admin.post(
+        "/api/schedules",
+        json={"roster": "FA26", "name": "Editable Copy", "duplicate_from_id": t_id},
+    )
+    assert dup_res.status_code == 201
+    dup_body = dup_res.json()["active"]
+    assert dup_body["schedule"]["is_transcript"] is False
+    dup_id = dup_body["schedule"]["id"]
+    assert (await admin.post(f"/api/schedules/{dup_id}/courses", json={"subject": "MATH", "catalog_nbr": "2940"})).status_code == 201

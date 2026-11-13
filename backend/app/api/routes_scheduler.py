@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -26,6 +27,7 @@ from app.services.scheduler import SchedulerService
 def get_insights(request: Request) -> CourseInsightsService:
     return request.app.state.insights
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/schedules", tags=["scheduler"])
 
 
@@ -115,6 +117,8 @@ async def quick_add_course_to_active_schedule(
     except FileExistsError:
         already_present = True
         hydrated = await scheduler.hydrate_schedule(schedule_id, user_id=int(user["id"]), user=user)
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -144,14 +148,17 @@ async def update_schedule(
     user: dict[str, Any] = Depends(get_current_user),
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> dict[str, Any]:
-    hydrated = await scheduler.update_schedule(
-        schedule_id=schedule_id,
-        user_id=int(user["id"]),
-        name=body.name,
-        is_active=body.is_active,
-        share_enabled=body.share_enabled,
-        regenerate_share_token=body.regenerate_share_token,
-    )
+    try:
+        hydrated = await scheduler.update_schedule(
+            schedule_id=schedule_id,
+            user_id=int(user["id"]),
+            name=body.name,
+            is_active=body.is_active,
+            share_enabled=body.share_enabled,
+            regenerate_share_token=body.regenerate_share_token,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if hydrated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     schedules = await scheduler.list_schedules(int(user["id"]), hydrated["schedule"]["roster"])
@@ -200,6 +207,8 @@ async def add_schedule_course(
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return hydrated
@@ -213,16 +222,19 @@ async def update_schedule_course(
     user: dict[str, Any] = Depends(get_current_user),
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> dict[str, Any]:
-    hydrated = await scheduler.update_course(
-        schedule_id=schedule_id,
-        item_id=item_id,
-        user_id=int(user["id"]),
-        enabled=body.enabled,
-        selected_units=body.selected_units,
-        selected_class_nbrs=body.selected_class_nbrs,
-        locked_class_nbrs=body.locked_class_nbrs,
-        color_idx=body.color_idx,
-    )
+    try:
+        hydrated = await scheduler.update_course(
+            schedule_id=schedule_id,
+            item_id=item_id,
+            user_id=int(user["id"]),
+            enabled=body.enabled,
+            selected_units=body.selected_units,
+            selected_class_nbrs=body.selected_class_nbrs,
+            locked_class_nbrs=body.locked_class_nbrs,
+            color_idx=body.color_idx,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if hydrated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule item not found")
     return hydrated
@@ -252,11 +264,14 @@ async def remove_schedule_course(
     user: dict[str, Any] = Depends(get_current_user),
     scheduler: SchedulerService = Depends(get_scheduler),
 ) -> dict[str, Any]:
-    hydrated = await scheduler.remove_course(
-        schedule_id=schedule_id,
-        item_id=item_id,
-        user_id=int(user["id"]),
-    )
+    try:
+        hydrated = await scheduler.remove_course(
+            schedule_id=schedule_id,
+            item_id=item_id,
+            user_id=int(user["id"]),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if hydrated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule item not found")
     return hydrated
@@ -357,10 +372,17 @@ async def batch_load_schedule_insights(
                     roster_u,
                     str(course_item["subject"]),
                     str(course_item["catalog_nbr"]),
-                    force=force,
+                    force_refresh=force,
                 )
                 return True
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Failed loading insights for %s %s %s: %s",
+                    roster_u,
+                    course_item.get("subject"),
+                    course_item.get("catalog_nbr"),
+                    exc,
+                )
                 return False
 
     results = await asyncio.gather(*(_fetch_one(c) for c in courses_to_load))

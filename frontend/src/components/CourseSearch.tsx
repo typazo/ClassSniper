@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  FileUp,
   Filter,
   GraduationCap,
   ListChecks,
@@ -47,6 +48,7 @@ import { CourseInsightsPanel } from "./CourseInsightsPanel";
 import { IlrDistributionExplorer, ilrToneClasses } from "./IlrDistributionExplorer";
 import { MultiSubjectSelect } from "./MultiSubjectSelect";
 import { StatusBadge } from "./StatusBadge";
+import { TranscriptImportModal } from "./TranscriptImportModal";
 import {
   getSectionLocationTag,
   getSectionVirtualLabel,
@@ -196,6 +198,7 @@ export function CourseSearch({
   const [activeSchedule, setActiveSchedule] = useState<HydratedSchedule | null>(null);
   const [loadingScheduleFit, setLoadingScheduleFit] = useState(false);
   const [prereqsModalOpen, setPrereqsModalOpen] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [searchMeta, setSearchMeta] = useState<SearchCoursesMeta | null>(null);
@@ -1153,6 +1156,16 @@ export function CourseSearch({
                 My Prereqs ({user.completed_courses?.length ?? 0})
               </button>
 
+              <button
+                type="button"
+                onClick={() => setTranscriptOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/45 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/25"
+                title="Parse Cornell Unofficial Transcript PDF/text locally in your browser"
+              >
+                <FileUp className="h-3.5 w-3.5" />
+                Import Transcript
+              </button>
+
               <label
                 className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
                   onlyEligible
@@ -1458,13 +1471,23 @@ export function CourseSearch({
           <span>
             No completed courses saved yet — showing only classes with no explicit required prerequisites.
           </span>
-          <button
-            type="button"
-            onClick={() => setPrereqsModalOpen(true)}
-            className="rounded-lg border border-sky-400/40 bg-sky-500/20 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500/30"
-          >
-            Select My Prereqs
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPrereqsModalOpen(true)}
+              className="rounded-lg border border-sky-400/40 bg-sky-500/20 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500/30"
+            >
+              Select My Prereqs
+            </button>
+            <button
+              type="button"
+              onClick={() => setTranscriptOpen(true)}
+              className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/45 bg-emerald-500/20 px-2.5 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/30"
+            >
+              <FileUp className="h-3 w-3" />
+              Import Transcript
+            </button>
+          </div>
         </div>
       )}
 
@@ -2224,6 +2247,10 @@ export function CourseSearch({
         majorMode={majorMode}
         showCsFeatures={showCsFeatures}
         onClose={() => setPrereqsModalOpen(false)}
+        onOpenTranscriptImport={() => {
+          setPrereqsModalOpen(false);
+          setTranscriptOpen(true);
+        }}
         onSaved={(res) => {
           onUserUpdated?.({
             ...user,
@@ -2243,6 +2270,58 @@ export function CourseSearch({
           }
         }}
       />
+      {transcriptOpen && (
+        <TranscriptImportModal
+          rosters={rosters}
+          activeRoster={selectedRoster}
+          existingCompleted={user.completed_courses || []}
+          existingDetails={user.completed_course_details || {}}
+          onClose={() => setTranscriptOpen(false)}
+          onImported={(result, nextChecklist) => {
+            onUserUpdated?.({
+              ...user,
+              completed_courses: nextChecklist.completed_courses,
+              completed_course_details: nextChecklist.completed_course_details,
+              in_progress_courses: nextChecklist.in_progress_courses,
+              in_progress_course_details: nextChecklist.in_progress_course_details,
+            });
+            const summary = result.import_summary;
+            const parts: string[] = [];
+            if (summary.added_completed.length > 0) {
+              parts.push(`${summary.added_completed.length} new completed course(s)`);
+            }
+            if ((summary.added_in_progress?.length ?? 0) > 0) {
+              parts.push(`${summary.added_in_progress!.length} currently taking course(s)`);
+            }
+            if (summary.enriched_completed.length > 0) {
+              parts.push(`${summary.enriched_completed.length} course detail(s) updated`);
+            }
+            if (summary.scheduler.length > 0) {
+              const totalAdded = summary.scheduler.reduce((sum, s) => sum + s.added.length, 0);
+              const totalUpdated = summary.scheduler.reduce((sum, s) => sum + s.updated.length, 0);
+              parts.push(
+                `${summary.scheduler.length} schedule(s) synced (${totalAdded} added, ${totalUpdated} updated)`
+              );
+            }
+            setSuccessMsg(
+              parts.length > 0
+                ? `Transcript imported: ${parts.join(", ")}.`
+                : "Transcript checked — your completed courses & schedules are already up to date."
+            );
+            if (
+              hasSearchedRef.current ||
+              csRequirement ||
+              ilrCodes.length > 0 ||
+              ilrMultiOnly ||
+              query.trim() ||
+              selectedSubjects.length > 0 ||
+              onlyEligible
+            ) {
+              void executeSearch({ silent: true });
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

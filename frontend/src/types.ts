@@ -11,6 +11,9 @@ export interface User {
   web_push_enabled: boolean;
   has_personal_webhook: boolean;
   completed_courses: string[];
+  completed_course_details?: Record<string, CourseDetailMeta>;
+  in_progress_courses?: string[];
+  in_progress_course_details?: Record<string, CourseDetailMeta>;
   include_implied_prereqs: boolean;
   major_mode: MajorMode;
   show_cs_features: boolean;
@@ -204,11 +207,15 @@ export interface PrereqCourseOption {
   subject: string;
   catalog_nbr: string;
   title: string;
+  cr?: string;
   crosslists: string[];
 }
 
 export interface UserPrereqsResponse {
   completed_courses: string[];
+  completed_course_details?: Record<string, CourseDetailMeta>;
+  in_progress_courses?: string[];
+  in_progress_course_details?: Record<string, CourseDetailMeta>;
   include_implied_prereqs: boolean;
   implied_courses: string[];
 }
@@ -229,6 +236,8 @@ export interface CatalogSubjectRefreshedSSE {
   synced_at: string;
   courses_count: number;
   section_statuses: Record<string, string>;
+  historical_lookup?: boolean;
+  resolved_courses?: string[];
   coverage?: {
     synced_subjects: number;
     total_subjects: number;
@@ -622,6 +631,7 @@ export interface ScheduleSummary {
   roster: string;
   name: string;
   is_active: boolean;
+  is_transcript?: boolean;
   share_enabled: boolean;
   share_token: string | null;
   share_url: string | null;
@@ -684,6 +694,12 @@ export interface CsChecklistSlotInput {
   cleared?: boolean;
 }
 
+export interface CsChecklistQuickOption {
+  code: string;
+  title?: string;
+  cr?: string;
+}
+
 export interface CsChecklistSlot {
   id: string;
   label: string;
@@ -697,8 +713,12 @@ export interface CsChecklistSlot {
   notes: string;
   attrs: string[];
   attr_code?: string;
-  source: "completed" | "schedule" | "manual" | "empty";
+  warning?: string;
+  source: "completed" | "in_progress" | "schedule" | "manual" | "empty" | "waived";
+  waived?: boolean;
+  waived_by?: string;
   search: CsChecklistSearchHint;
+  quick_options?: CsChecklistQuickOption[];
 }
 
 export interface CsChecklistSection {
@@ -706,6 +726,12 @@ export interface CsChecklistSection {
   title: string;
   subtitle: string;
   slots: CsChecklistSlot[];
+}
+
+export interface CourseDetailMeta {
+  gr?: string;
+  sem?: string;
+  cr?: string;
 }
 
 export interface CsChecklistPayload {
@@ -716,7 +742,11 @@ export interface CsChecklistPayload {
   active_schedule_name: string;
   pe_completed: number;
   completed_courses: string[];
+  completed_course_details?: Record<string, CourseDetailMeta>;
+  in_progress_courses: string[];
+  in_progress_course_details?: Record<string, CourseDetailMeta>;
   planned_courses: string[];
+  missing_metadata_courses?: string[];
   as_distribution_summary: {
     covered_categories: number;
     total_categories: number;
@@ -727,8 +757,56 @@ export interface CsChecklistPayload {
     total_slots: number;
     filled_slots: number;
     completed_slots: number;
+    in_progress_slots: number;
     whatif_slots: number;
     remaining_slots: number;
   };
   sections: CsChecklistSection[];
+  manual_slots?: Record<string, CsChecklistSlotInput>;
+}
+
+export interface ImportTranscriptRequest {
+  roster?: string;
+  completed_courses: Array<{
+    course: string;
+    sem?: string;
+    gr?: string;
+    cr?: string;
+  }>;
+  in_progress_courses: Array<{
+    course: string;
+    roster: string;
+    cr?: string;
+  }>;
+  past_schedule_courses?: Array<{
+    course: string;
+    roster: string;
+    cr?: string;
+  }>;
+  sync_in_progress_to_checklist?: boolean;
+  sync_completed_to_scheduler?: boolean;
+  pe_completed?: number;
+}
+
+export interface SchedulerImportResult {
+  roster: string;
+  schedule_id: number;
+  schedule_name: string;
+  added: string[];
+  updated: string[];
+  already_present: string[];
+  skipped: Array<{ course: string; reason: string }>;
+}
+
+export interface ImportTranscriptResponse {
+  checklist: CsChecklistPayload;
+  import_summary: {
+    added_completed: string[];
+    added_in_progress?: string[];
+    enriched_completed: string[];
+    unchanged_completed: string[];
+    enriched_slots: string[];
+    pe_completed: number;
+    scheduler: SchedulerImportResult[];
+  };
 }

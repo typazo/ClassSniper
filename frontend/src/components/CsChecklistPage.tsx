@@ -1,13 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   CalendarCheck2,
   Check,
   CheckSquare,
+  Clock,
   Edit3,
   Eraser,
+  FileUp,
   GraduationCap,
   ListChecks,
   Loader2,
+  Minus,
   Plus,
   RotateCcw,
   Search,
@@ -18,9 +22,12 @@ import {
 import { api } from "../api/client";
 import type {
   AttrMatchMode,
+  CatalogSubjectRefreshedSSE,
+  CourseDetailMeta,
   CourseSearchPreset,
   CSCurriculumMode,
   CsChecklistPayload,
+  CsChecklistQuickOption,
   CsChecklistSlot,
   CsChecklistSlotInput,
   CSRequirementMode,
@@ -29,6 +36,7 @@ import type {
   User,
 } from "../types";
 import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
+import { TranscriptImportModal } from "./TranscriptImportModal";
 
 const COURSE_CODE_RE = /([A-Za-z]{2,8})[\s\-:]*(\d{3,4}[A-Za-z]?)/g;
 
@@ -45,9 +53,21 @@ function parseCourseInputTokens(raw: string): string[] {
   return out;
 }
 
+function formatUnitsRange(unitsMin?: number | null, unitsMax?: number | null): string {
+  const lo = Number(unitsMin ?? 0);
+  const hi = Number(unitsMax ?? 0);
+  if (lo <= 0 && hi <= 0) return "";
+  if (hi <= 0 || Math.abs(lo - hi) < 1e-6) {
+    const v = lo > 0 ? lo : hi;
+    return Number.isInteger(v) ? String(v) : String(v);
+  }
+  return `${lo}-${hi}`;
+}
+
 interface Props {
   user: User;
   initialRoster?: string;
+  lastCatalogRefresh?: CatalogSubjectRefreshedSSE | null;
   onUserUpdated?: (user: User) => void;
   onLaunchSearch: (preset: CourseSearchPreset) => void;
 }
@@ -97,7 +117,263 @@ function buildPresetFromSlots(
   };
 }
 
-export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSearch }: Props) {
+interface QuickAddCardProps {
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  tone: "taken" | "taking";
+  roster: string;
+  courses: string[];
+  details?: Record<string, CourseDetailMeta>;
+  alreadyTakenSet: Set<string>;
+  alreadyTakingSet: Set<string>;
+  saving: boolean;
+  placeholder: string;
+  addLabel: string;
+  emptyText: string;
+  headerActions?: React.ReactNode;
+  onAdd: (codes: string[]) => Promise<void>;
+  onRemove: (code: string) => Promise<void>;
+  onPromoteToTaken?: (code: string) => Promise<void>;
+}
+
+function CourseQuickAddCard({
+  title,
+  subtitle,
+  icon,
+  tone,
+  roster,
+  courses,
+  details,
+  alreadyTakenSet,
+  alreadyTakingSet,
+  saving,
+  placeholder,
+  addLabel,
+  emptyText,
+  headerActions,
+  onAdd,
+  onRemove,
+  onPromoteToTaken,
+}: QuickAddCardProps) {
+  const [input, setInput] = useState("");
+  const [options, setOptions] = useState<PrereqCourseOption[]>([]);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    const q = input.trim();
+    if (!q || !roster) {
+      setOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      api
+        .getPrereqOptions(roster, q, 10, "cs")
+        .then((res) => {
+          if (!cancelled) setOptions(res.options);
+        })
+        .catch(() => {
+          if (!cancelled) setOptions([]);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [input, roster]);
+
+  const handleSubmitCodes = async (codes: string[]) => {
+    const clean = codes.map((c) => c.trim().toUpperCase()).filter(Boolean);
+    if (clean.length === 0) return;
+    await onAdd(clean);
+    setInput("");
+    setOptions([]);
+  };
+
+  const isTakingTone = tone === "taking";
+  const borderAccent = isTakingTone ? "border-amber-500/30" : "border-zinc-800";
+  const chipCls = isTakingTone
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+    : "border-emerald-500/35 bg-emerald-500/10 text-emerald-200";
+  const subBadgeCls = isTakingTone
+    ? "bg-amber-500/20 text-amber-100"
+    : "bg-emerald-500/20 text-emerald-100";
+  const btnCls = isTakingTone
+    ? "bg-amber-500 text-zinc-950 hover:bg-amber-400"
+    : "bg-sky-500 text-zinc-950 hover:bg-sky-400";
+
+  return (
+    <div className={`rounded-2xl border ${borderAccent} bg-zinc-900/75 p-4 space-y-3`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            {icon}
+            <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-200">{title}</h3>
+            {saving && (
+              <Loader2
+                className={`h-3.5 w-3.5 animate-spin ${
+                  isTakingTone ? "text-amber-400" : "text-sky-400"
+                }`}
+              />
+            )}
+          </div>
+          <p className="mt-0.5 text-[11px] text-zinc-400">{subtitle}</p>
+        </div>
+        {headerActions && <div className="flex flex-wrap items-center gap-2">{headerActions}</div>}
+      </div>
+
+      <div className="relative flex flex-wrap gap-2">
+        <div className="relative min-w-[200px] flex-1">
+          <input
+            type="text"
+            value={input}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setTimeout(() => setFocused(false), 180)}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                const parsed = parseCourseInputTokens(input);
+                if (parsed.length > 0) {
+                  void handleSubmitCodes(parsed);
+                } else if (options.length > 0) {
+                  void handleSubmitCodes([options[0].code]);
+                }
+              }
+            }}
+            placeholder={placeholder}
+            className={`w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none ${
+              isTakingTone ? "focus:border-amber-500" : "focus:border-sky-500"
+            }`}
+          />
+
+          {focused && input.trim() && options.length > 0 && (
+            <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-1 shadow-2xl">
+              {options.map((opt) => {
+                const inTaken = alreadyTakenSet.has(opt.code);
+                const inTaking = alreadyTakingSet.has(opt.code);
+                const alreadyInThisList = isTakingTone ? inTaking : inTaken;
+                return (
+                  <button
+                    key={opt.code}
+                    type="button"
+                    disabled={alreadyInThisList}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      if (!alreadyInThisList) {
+                        void handleSubmitCodes([opt.code]);
+                      }
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs ${
+                      alreadyInThisList
+                        ? "cursor-default text-zinc-500"
+                        : "text-zinc-200 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span className="truncate">
+                      <span className="font-mono font-semibold text-white">{opt.code}</span>
+                      {opt.title ? <span className="ml-2 text-zinc-400">{opt.title}</span> : null}
+                    </span>
+                    {alreadyInThisList ? (
+                      <span
+                        className={`text-[10px] ${
+                          isTakingTone ? "text-amber-300" : "text-emerald-400"
+                        }`}
+                      >
+                        {isTakingTone ? "Taking" : "Taken"}
+                      </span>
+                    ) : isTakingTone && inTaken ? (
+                      <span className="text-[10px] text-emerald-400">Taken</span>
+                    ) : (
+                      <Plus
+                        className={`h-3.5 w-3.5 shrink-0 ${
+                          isTakingTone ? "text-amber-400" : "text-sky-400"
+                        }`}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          disabled={saving || (!parseCourseInputTokens(input).length && options.length === 0)}
+          onClick={() => {
+            const parsed = parseCourseInputTokens(input);
+            if (parsed.length > 0) {
+              void handleSubmitCodes(parsed);
+            } else if (options.length > 0) {
+              void handleSubmitCodes([options[0].code]);
+            }
+          }}
+          className={`inline-flex items-center gap-1 rounded-xl px-3.5 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${btnCls}`}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          {addLabel}
+        </button>
+      </div>
+
+      {courses.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {courses.map((code) => {
+            const det = details?.[code];
+            const pillText = isTakingTone ? det?.sem : det?.gr;
+            return (
+              <span
+                key={code}
+                title={
+                  det
+                    ? [det.sem, det.gr, det.cr ? `${det.cr} cr` : ""].filter(Boolean).join(" • ")
+                    : undefined
+                }
+                className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 font-mono text-[11px] font-medium ${chipCls}`}
+              >
+                <span>{code}</span>
+                {pillText && (
+                  <span className={`rounded px-1 text-[10px] font-semibold ${subBadgeCls}`}>
+                    {pillText}
+                  </span>
+                )}
+                {onPromoteToTaken && (
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void onPromoteToTaken(code)}
+                    title={`Mark ${code} as Completed`}
+                    className="rounded p-0.5 text-amber-300/80 hover:bg-emerald-500/20 hover:text-emerald-200"
+                  >
+                    <Check className="h-3 w-3" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void onRemove(code)}
+                  title={`Remove ${code}`}
+                  className={`rounded p-0.5 ${
+                    isTakingTone
+                      ? "text-amber-300/80 hover:bg-amber-500/20 hover:text-white"
+                      : "text-emerald-300/80 hover:bg-emerald-500/20 hover:text-white"
+                  }`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-[11px] text-zinc-500">{emptyText}</p>
+      )}
+    </div>
+  );
+}
+
+export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUserUpdated, onLaunchSearch }: Props) {
   const [rosters, setRosters] = useState<Roster[]>([]);
   const [selectedRoster, setSelectedRoster] = useState(initialRoster || "");
   const [checklist, setChecklist] = useState<CsChecklistPayload | null>(null);
@@ -111,16 +387,23 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
     gr: "",
     notes: "",
   });
+  const [editSaveMode, setEditSaveMode] = useState<"taken" | "taking" | "box">("taken");
+  const [slotPickerFocused, setSlotPickerFocused] = useState(false);
+  const [slotSearchDirty, setSlotSearchDirty] = useState(false);
+  const [slotSearchOptions, setSlotSearchOptions] = useState<PrereqCourseOption[]>([]);
+  const [slotSuggestionsCache, setSlotSuggestionsCache] = useState<
+    Record<string, CsChecklistQuickOption[]>
+  >({});
+  const [slotSuggestionsLoading, setSlotSuggestionsLoading] = useState(false);
   const [selectedEmptyIds, setSelectedEmptyIds] = useState<string[]>([]);
   const [multiAttrMatch, setMultiAttrMatch] = useState<AttrMatchMode>("any");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [prereqsOpen, setPrereqsOpen] = useState(false);
-  const [takenInput, setTakenInput] = useState("");
-  const [takenOptions, setTakenOptions] = useState<PrereqCourseOption[]>([]);
-  const [takenFocused, setTakenFocused] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [takenSaving, setTakenSaving] = useState(false);
+  const [takingSaving, setTakingSaving] = useState(false);
 
   useEffect(() => {
     if (initialRoster && initialRoster !== selectedRoster) {
@@ -148,23 +431,7 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
     try {
       const data = await api.getCsChecklist(rosterSlug);
       setChecklist(data);
-      const nextDraft: Record<string, CsChecklistSlotInput> = {};
-      for (const sec of data.sections) {
-        for (const sl of sec.slots) {
-          if (sl.course || sl.sem || sl.gr || sl.cr || sl.notes) {
-            nextDraft[sl.id] = {
-              course: sl.course,
-              title: sl.title,
-              cr: sl.cr,
-              sem: sl.sem,
-              gr: sl.gr,
-              notes: sl.notes,
-              pinned: sl.source === "manual",
-            };
-          }
-        }
-      }
-      setDraftSlots(nextDraft);
+      setDraftSlots(data.manual_slots || {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load CS Checklist");
     } finally {
@@ -179,9 +446,37 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
   }, [selectedRoster, loadChecklist]);
 
   useEffect(() => {
-    const q = takenInput.trim();
-    if (!q || !selectedRoster) {
-      setTakenOptions([]);
+    if (!lastCatalogRefresh || !selectedRoster || saving || editingSlotId) return;
+    const missing = checklist?.missing_metadata_courses || [];
+    const subjPrefix = `${lastCatalogRefresh.subject} `;
+    const relevant =
+      lastCatalogRefresh.historical_lookup ||
+      missing.some((code) => code.startsWith(subjPrefix));
+    if (!relevant) return;
+
+    let cancelled = false;
+    api
+      .getCsChecklist(selectedRoster)
+      .then((data) => {
+        if (!cancelled) {
+          setChecklist(data);
+          setDraftSlots(data.manual_slots || {});
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [lastCatalogRefresh, selectedRoster]);
+
+  useEffect(() => {
+    if (!editingSlotId || !selectedRoster || !slotSearchDirty) {
+      setSlotSearchOptions([]);
+      return;
+    }
+    const q = editForm.course.trim();
+    if (!q) {
+      setSlotSearchOptions([]);
       return;
     }
     let cancelled = false;
@@ -189,17 +484,17 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
       api
         .getPrereqOptions(selectedRoster, q, 10, "cs")
         .then((res) => {
-          if (!cancelled) setTakenOptions(res.options);
+          if (!cancelled) setSlotSearchOptions(res.options);
         })
         .catch(() => {
-          if (!cancelled) setTakenOptions([]);
+          if (!cancelled) setSlotSearchOptions([]);
         });
-    }, 150);
+    }, 140);
     return () => {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [takenInput, selectedRoster]);
+  }, [editingSlotId, editForm.course, selectedRoster]);
 
   const updateTakenList = async (nextCompleted: string[]) => {
     setTakenSaving(true);
@@ -233,8 +528,6 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
     if (clean.length === 0) return;
     const current = checklist?.completed_courses || user.completed_courses || [];
     await updateTakenList([...current, ...clean]);
-    setTakenInput("");
-    setTakenOptions([]);
   };
 
   const removeTakenCourse = async (code: string) => {
@@ -242,12 +535,71 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
     await updateTakenList(current.filter((c) => c !== code));
   };
 
+  const updateTakingList = async (nextInProgress: string[], nextCompletedOverride?: string[]) => {
+    if (!checklist) return;
+    setTakingSaving(true);
+    setError("");
+    try {
+      const normalizedTaking = Array.from(
+        new Set(nextInProgress.map((c) => c.trim().toUpperCase()).filter(Boolean))
+      ).sort();
+      const updated = await api.updateCsChecklist(
+        {
+          college: checklist.college,
+          curriculum: checklist.curriculum,
+          include_active_schedule: checklist.include_active_schedule,
+          pe_completed: checklist.pe_completed,
+          slots: draftSlots,
+          sync_in_progress_courses: normalizedTaking,
+          ...(nextCompletedOverride !== undefined
+            ? { sync_completed_courses: nextCompletedOverride }
+            : {}),
+        },
+        selectedRoster || undefined
+      );
+      setChecklist(updated);
+      setDraftSlots(updated.manual_slots || draftSlots);
+      onUserUpdated?.({
+        ...user,
+        completed_courses: updated.completed_courses,
+        completed_course_details: updated.completed_course_details,
+        in_progress_courses: updated.in_progress_courses,
+        in_progress_course_details: updated.in_progress_course_details,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update currently taking courses");
+    } finally {
+      setTakingSaving(false);
+    }
+  };
+
+  const addTakingCourses = async (codes: string[]) => {
+    const clean = codes.map((c) => c.trim().toUpperCase()).filter(Boolean);
+    if (clean.length === 0) return;
+    const current = checklist?.in_progress_courses || user.in_progress_courses || [];
+    await updateTakingList([...current, ...clean]);
+  };
+
+  const removeTakingCourse = async (code: string) => {
+    const current = checklist?.in_progress_courses || user.in_progress_courses || [];
+    await updateTakingList(current.filter((c) => c !== code));
+  };
+
+  const promoteTakingToTaken = async (code: string) => {
+    if (!checklist) return;
+    const nextTaken = Array.from(new Set([...checklist.completed_courses, code])).sort();
+    const nextTaking = checklist.in_progress_courses.filter((c) => c !== code);
+    await updateTakingList(nextTaking, nextTaken);
+  };
+
   const persistChecklist = async (
     nextCollege: "arts" | "engineering",
     nextCurriculum: CSCurriculumMode,
     nextIncludeSched: boolean,
     nextPe: number,
-    nextSlots: Record<string, CsChecklistSlotInput>
+    nextSlots: Record<string, CsChecklistSlotInput>,
+    syncCompletedCourses?: string[],
+    syncInProgressCourses?: string[]
   ) => {
     setSaving(true);
     setError("");
@@ -259,10 +611,26 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
           include_active_schedule: nextIncludeSched,
           pe_completed: nextPe,
           slots: nextSlots,
+          ...(syncCompletedCourses !== undefined
+            ? { sync_completed_courses: syncCompletedCourses }
+            : {}),
+          ...(syncInProgressCourses !== undefined
+            ? { sync_in_progress_courses: syncInProgressCourses }
+            : {}),
         },
         selectedRoster || undefined
       );
       setChecklist(updated);
+      setDraftSlots(updated.manual_slots || nextSlots);
+      if (syncCompletedCourses !== undefined || syncInProgressCourses !== undefined) {
+        onUserUpdated?.({
+          ...user,
+          completed_courses: updated.completed_courses,
+          completed_course_details: updated.completed_course_details,
+          in_progress_courses: updated.in_progress_courses,
+          in_progress_course_details: updated.in_progress_course_details,
+        });
+      }
       setSelectedEmptyIds((prev) =>
         prev.filter((id) =>
           updated.sections.some((sec) => sec.slots.some((sl) => sl.id === id && !sl.filled))
@@ -299,10 +667,20 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
 
   const startEditSlot = (slot: CsChecklistSlot) => {
     setEditingSlotId(slot.id);
+    setSlotSearchDirty(false);
+    setSlotSearchOptions([]);
+    setEditSaveMode(
+      slot.source === "in_progress" ? "taking" : slot.source === "schedule" ? "box" : "taken"
+    );
     const existing = draftSlots[slot.id];
+    const startCourse = existing?.course || slot.course || "";
+    const startTitle =
+      existing && existing.course === slot.course
+        ? existing.title || ""
+        : "";
     setEditForm({
-      course: existing?.course || slot.course || "",
-      title: existing?.title || slot.title || "",
+      course: startCourse,
+      title: startTitle,
       cr: existing?.cr || slot.cr || "",
       sem: existing?.sem || slot.sem || "",
       gr: existing?.gr || slot.gr || "",
@@ -310,28 +688,108 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
       pinned: true,
       cleared: false,
     });
+
+    const hasManyFixedQuick = (slot.quick_options?.length ?? 0) >= 4;
+    const cacheKey = `${selectedRoster}:${slot.id}`;
+    const hasSearchHints = Boolean(
+      slot.search?.cs_requirement ||
+        (slot.search?.attrs && slot.search.attrs.length > 0) ||
+        (slot.search?.subjects && slot.search.subjects.length > 0)
+    );
+    if (!hasManyFixedQuick && hasSearchHints && selectedRoster && !slotSuggestionsCache[cacheKey]) {
+      setSlotSuggestionsLoading(true);
+      api
+        .searchCourses(selectedRoster, "", {
+          cs_requirement: slot.search?.cs_requirement,
+          attrs: slot.search?.attrs,
+          subjects: slot.search?.subjects,
+          min_credits: slot.search?.min_credits,
+          curriculum: checklist?.curriculum,
+          refresh_stale: false,
+          limit: 16,
+        })
+        .then((res) => {
+          const seen = new Set<string>();
+          const items: CsChecklistQuickOption[] = [];
+          for (const c of res.courses) {
+            const code = `${c.subject.toUpperCase()} ${c.catalog_nbr.toUpperCase()}`;
+            if (seen.has(code)) continue;
+            seen.add(code);
+            items.push({
+              code,
+              title: c.title_long || c.title_short || "",
+              cr: formatUnitsRange(c.units_min, c.units_max),
+            });
+            if (items.length >= 8) break;
+          }
+          setSlotSuggestionsCache((prev) => ({ ...prev, [cacheKey]: items }));
+        })
+        .catch(() => {})
+        .finally(() => setSlotSuggestionsLoading(false));
+    }
   };
 
-  const saveEditSlot = async (slotId: string) => {
+  const applySlotCourse = async (
+    slotId: string,
+    rawCourse: string,
+    crOverride?: string,
+    titleOverride?: string
+  ) => {
     if (!checklist) return;
+    const prevSlot = slotLookup.get(slotId);
+    const prevCourse = (prevSlot?.course || "").trim().toUpperCase();
+    const parsed = parseCourseInputTokens(rawCourse);
+    const nextCourse = (parsed[0] || rawCourse).trim().toUpperCase();
+    const courseChanged = nextCourse !== prevCourse;
+    const resolvedCr =
+      crOverride !== undefined
+        ? crOverride
+        : courseChanged && editForm.cr === (prevSlot?.cr || "")
+          ? ""
+          : editForm.cr.trim();
     const nextSlots: Record<string, CsChecklistSlotInput> = {
       ...draftSlots,
       [slotId]: {
         ...editForm,
-        course: editForm.course.trim().toUpperCase(),
-        pinned: Boolean(editForm.course.trim()),
-        cleared: !editForm.course.trim(),
+        course: nextCourse,
+        title: titleOverride !== undefined ? titleOverride : courseChanged ? "" : editForm.title.trim(),
+        cr: resolvedCr,
+        pinned: Boolean(nextCourse),
+        cleared: !nextCourse,
       },
     };
+    let syncCompleted: string[] | undefined;
+    let syncInProgress: string[] | undefined;
+    if (nextCourse) {
+      if (editSaveMode === "taken") {
+        syncCompleted = Array.from(new Set([...checklist.completed_courses, nextCourse])).sort();
+        if (checklist.in_progress_courses.includes(nextCourse)) {
+          syncInProgress = checklist.in_progress_courses.filter((c) => c !== nextCourse);
+        }
+      } else if (editSaveMode === "taking") {
+        syncInProgress = Array.from(new Set([...checklist.in_progress_courses, nextCourse])).sort();
+        if (checklist.completed_courses.includes(nextCourse)) {
+          syncCompleted = checklist.completed_courses.filter((c) => c !== nextCourse);
+        }
+      }
+    }
     setDraftSlots(nextSlots);
     setEditingSlotId(null);
+    setSlotSearchOptions([]);
+    setSlotPickerFocused(false);
     await persistChecklist(
       checklist.college,
       checklist.curriculum,
       checklist.include_active_schedule,
       checklist.pe_completed,
-      nextSlots
+      nextSlots,
+      syncCompleted,
+      syncInProgress
     );
+  };
+
+  const saveEditSlot = async (slotId: string) => {
+    await applySlotCourse(slotId, editForm.course);
   };
 
   const clearSlot = async (slotId: string) => {
@@ -392,7 +850,9 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
               )}
             </div>
             <p className="mt-1 text-xs text-zinc-400">
-              Auto-populates from your completed courses &amp; active What-If schedule. Click any{" "}
+              Auto-populates from completed courses,{" "}
+              <span className="font-medium text-amber-300">currently taking</span> classes, &amp;
+              active What-If schedule. Click any{" "}
               <span className="text-emerald-300 font-medium">empty box</span> to select and search
               for courses that fill your missing requirements.
             </p>
@@ -410,6 +870,16 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                 </option>
               ))}
             </select>
+
+            <button
+              type="button"
+              onClick={() => setTranscriptOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/45 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+              title="Parse Cornell Unofficial Transcript PDF/text locally in your browser"
+            >
+              <FileUp className="h-3.5 w-3.5" />
+              Import Transcript
+            </button>
 
             <button
               type="button"
@@ -559,6 +1029,11 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
               <span className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 font-medium text-emerald-300">
                 Done: {checklist.summary.completed_slots}
               </span>
+              {checklist.summary.in_progress_slots > 0 && (
+                <span className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 font-medium text-amber-200">
+                  Taking: +{checklist.summary.in_progress_slots}
+                </span>
+              )}
               {checklist.summary.whatif_slots > 0 && (
                 <span className="rounded-lg border border-sky-500/35 bg-sky-500/10 px-2.5 py-1 font-medium text-sky-200">
                   What-If: +{checklist.summary.whatif_slots}
@@ -578,136 +1053,65 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
         </div>
       )}
 
-      {/* Inline Classes I've Taken Quick-Add Bar */}
+      {/* Classes I've Taken & Classes Currently Taking Quick-Add Cards */}
       {checklist && (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/75 p-4 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="flex items-center gap-2">
-                <ListChecks className="h-4 w-4 text-sky-400" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-200">
-                  Classes I&apos;ve Taken ({checklist.completed_courses.length})
-                </h3>
-                {takenSaving && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-                )}
-              </div>
-              <p className="mt-0.5 text-[11px] text-zinc-400">
-                Add past or current courses right here (e.g. <span className="font-mono text-zinc-300">CS 5470, CS 5306</span>) to auto-fill checklist slots &amp; satisfy prereqs.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setPrereqsOpen(true)}
-              className="rounded-xl border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-sky-500/50 hover:text-sky-200"
-            >
-              Bundles &amp; Implied Prereqs...
-            </button>
-          </div>
-
-          <div className="relative flex flex-wrap gap-2">
-            <div className="relative min-w-[220px] flex-1">
-              <input
-                type="text"
-                value={takenInput}
-                onFocus={() => setTakenFocused(true)}
-                onBlur={() => setTimeout(() => setTakenFocused(false), 180)}
-                onChange={(e) => setTakenInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    const parsed = parseCourseInputTokens(takenInput);
-                    if (parsed.length > 0) {
-                      void addTakenCourses(parsed);
-                    } else if (takenOptions.length > 0) {
-                      void addTakenCourses([takenOptions[0].code]);
-                    }
-                  }
-                }}
-                placeholder="Type course code or title (e.g. CS 5470, CS 5306) and press Enter..."
-                className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-500 focus:border-sky-500 focus:outline-none"
-              />
-
-              {takenFocused && takenInput.trim() && takenOptions.length > 0 && (
-                <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-1 shadow-2xl">
-                  {takenOptions.map((opt) => {
-                    const alreadyAdded = checklist.completed_courses.includes(opt.code);
-                    return (
-                      <button
-                        key={opt.code}
-                        type="button"
-                        disabled={alreadyAdded}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          if (!alreadyAdded) {
-                            void addTakenCourses([opt.code]);
-                          }
-                        }}
-                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs ${
-                          alreadyAdded
-                            ? "cursor-default text-zinc-500"
-                            : "text-zinc-200 hover:bg-zinc-800"
-                        }`}
-                      >
-                        <span className="truncate">
-                          <span className="font-mono font-semibold text-white">{opt.code}</span>
-                          {opt.title ? <span className="ml-2 text-zinc-400">{opt.title}</span> : null}
-                        </span>
-                        {alreadyAdded ? (
-                          <span className="text-[10px] text-emerald-400">Added</span>
-                        ) : (
-                          <Plus className="h-3.5 w-3.5 shrink-0 text-sky-400" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <button
-              type="button"
-              disabled={takenSaving || (!parseCourseInputTokens(takenInput).length && takenOptions.length === 0)}
-              onClick={() => {
-                const parsed = parseCourseInputTokens(takenInput);
-                if (parsed.length > 0) {
-                  void addTakenCourses(parsed);
-                } else if (takenOptions.length > 0) {
-                  void addTakenCourses([takenOptions[0].code]);
-                }
-              }}
-              className="inline-flex items-center gap-1 rounded-xl bg-sky-500 px-3.5 py-2 text-xs font-semibold text-zinc-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Class
-            </button>
-          </div>
-
-          {checklist.completed_courses.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {checklist.completed_courses.map((code) => (
-                <span
-                  key={code}
-                  className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] font-medium text-emerald-200"
+        <div className="grid gap-4 lg:grid-cols-2">
+          <CourseQuickAddCard
+            title={`Classes I've Taken (${checklist.completed_courses.length})`}
+            subtitle="Completed & AP courses that auto-fill checklist boxes as Done & satisfy prereqs."
+            icon={<ListChecks className="h-4 w-4 text-sky-400" />}
+            tone="taken"
+            roster={selectedRoster}
+            courses={checklist.completed_courses}
+            details={checklist.completed_course_details}
+            alreadyTakenSet={new Set(checklist.completed_courses)}
+            alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
+            saving={takenSaving}
+            placeholder="Type course code, title, or AP (e.g. ENGL 1100F, AP Lit)..."
+            addLabel="Add Class"
+            emptyText="No completed classes recorded yet. Type above, import transcript, or open Bundles."
+            headerActions={
+              <>
+                <button
+                  type="button"
+                  onClick={() => setTranscriptOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/45 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+                  title="Parse Cornell Unofficial Transcript PDF/text locally in your browser"
                 >
-                  {code}
-                  <button
-                    type="button"
-                    disabled={takenSaving}
-                    onClick={() => void removeTakenCourse(code)}
-                    title={`Remove ${code}`}
-                    className="rounded p-0.5 text-emerald-300/80 hover:bg-emerald-500/20 hover:text-white"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="text-[11px] text-zinc-500">
-              No classes recorded yet. Type above or open Bundles to add courses you have already taken.
-            </p>
-          )}
+                  <FileUp className="h-3.5 w-3.5" />
+                  Import Transcript
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPrereqsOpen(true)}
+                  className="rounded-xl border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-sky-500/50 hover:text-sky-200"
+                >
+                  Bundles...
+                </button>
+              </>
+            }
+            onAdd={addTakenCourses}
+            onRemove={removeTakenCourse}
+          />
+
+          <CourseQuickAddCard
+            title={`Classes Currently Taking (${checklist.in_progress_courses?.length ?? 0})`}
+            subtitle="Classes enrolled right now (e.g. CS 5306, CS 4820) — fills checklist boxes as Currently Taking & unlocks next-term prereqs."
+            icon={<Clock className="h-4 w-4 text-amber-400" />}
+            tone="taking"
+            roster={selectedRoster}
+            courses={checklist.in_progress_courses || []}
+            details={checklist.in_progress_course_details}
+            alreadyTakenSet={new Set(checklist.completed_courses)}
+            alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
+            saving={takingSaving}
+            placeholder="Type course taking right now (e.g. CS 5306, CS 4820)..."
+            addLabel="Add Taking"
+            emptyText="No currently taking classes yet. Add this semester's classes here or import your transcript."
+            onAdd={addTakingCourses}
+            onRemove={removeTakingCourse}
+            onPromoteToTaken={promoteTakingToTaken}
+          />
         </div>
       )}
 
@@ -787,18 +1191,20 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
       ) : (
         checklist && (
           <div className="grid gap-4 lg:grid-cols-2">
-            {checklist.sections.map((section) => (
+            {checklist.sections.map((section) => {
+              const activeSectionSlots = section.slots.filter((s) => !s.waived);
+              return (
               <div
                 key={section.id}
-                className={`overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/75 ${
+                className={`rounded-2xl border border-zinc-800 bg-zinc-900/75 ${
                   section.id === "cs_electives" ? "lg:col-span-2" : ""
                 }`}
               >
-                <div className="border-b border-zinc-800/90 bg-zinc-950/70 px-4 py-3">
+                <div className="rounded-t-2xl border-b border-zinc-800/90 bg-zinc-950/70 px-4 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-bold text-white">{section.title}</h3>
                     <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium text-zinc-300">
-                      {section.slots.filter((s) => s.filled).length}/{section.slots.length}
+                      {activeSectionSlots.filter((s) => s.filled).length}/{activeSectionSlots.length}
                     </span>
                   </div>
                   <p className="mt-0.5 text-[11px] text-zinc-400">{section.subtitle}</p>
@@ -810,27 +1216,165 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                     const isEditing = editingSlotId === slot.id;
 
                     if (isEditing) {
+                      const placedInSectionOrCore = new Set<string>();
+                      if (section.id !== "as_distribution") {
+                        for (const sec of checklist.sections) {
+                          if (sec.id === "as_distribution") continue;
+                          for (const s of sec.slots) {
+                            if (s.id !== slot.id && s.filled && s.course) {
+                              placedInSectionOrCore.add(s.course);
+                            }
+                          }
+                        }
+                      }
+                      const fixedQuick = slot.quick_options || [];
+                      const liveQuick = slotSuggestionsCache[`${selectedRoster}:${slot.id}`] || [];
+                      const mergedQuick: CsChecklistQuickOption[] = [];
+                      const seenQuick = new Set<string>();
+                      for (const opt of [...fixedQuick, ...liveQuick]) {
+                        if (seenQuick.has(opt.code) || placedInSectionOrCore.has(opt.code)) continue;
+                        seenQuick.add(opt.code);
+                        mergedQuick.push(opt);
+                      }
+                      const suggestions = mergedQuick.slice(0, 8);
                       return (
-                        <div key={slot.id} className="space-y-2 bg-zinc-950/90 p-3 text-xs">
-                          <div className="flex items-center justify-between">
+                        <div key={slot.id} className="space-y-2.5 bg-zinc-950/90 p-3 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <span className="font-semibold text-white">
-                              Edit Slot: {slot.label}
+                              {slot.filled ? `Edit Box: ${slot.label}` : `Add Course: ${slot.label}`}
                             </span>
                             <span className="text-[11px] text-zinc-400">{slot.expected}</span>
                           </div>
+
+                          {/* One-click quick-pick chips */}
+                          {(suggestions.length > 0 || slotSuggestionsLoading) && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                                Quick pick:
+                              </span>
+                              {slotSuggestionsLoading && suggestions.length === 0 ? (
+                                <Loader2 className="h-3 w-3 animate-spin text-zinc-400" />
+                              ) : (
+                                suggestions.map((opt) => {
+                                  const isTaken = checklist.completed_courses.includes(opt.code);
+                                  const isTaking = (checklist.in_progress_courses || []).includes(opt.code);
+                                  return (
+                                    <button
+                                      key={opt.code}
+                                      type="button"
+                                      disabled={saving}
+                                      onClick={() =>
+                                        void applySlotCourse(
+                                          slot.id,
+                                          opt.code,
+                                          opt.cr || "",
+                                          opt.title || ""
+                                        )
+                                      }
+                                      title={opt.title ? `${opt.code}: ${opt.title}` : opt.code}
+                                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 font-mono text-[11px] font-medium transition ${
+                                        isTaken
+                                          ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
+                                          : isTaking
+                                            ? "border-amber-500/45 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                                            : "border-sky-500/35 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20"
+                                      }`}
+                                    >
+                                      <Plus className="h-2.5 w-2.5" />
+                                      <span>{opt.code}</span>
+                                      {opt.cr && (
+                                        <span className="text-[10px] opacity-70">({opt.cr})</span>
+                                      )}
+                                    </button>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
+
                           <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
-                            <input
-                              type="text"
-                              value={editForm.course}
-                              onChange={(e) => setEditForm({ ...editForm, course: e.target.value })}
-                              placeholder="Course (e.g. CS 4780)"
-                              className="col-span-2 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-white"
-                            />
+                            <div className="relative col-span-2 sm:col-span-3">
+                              <input
+                                type="text"
+                                autoFocus
+                                value={editForm.course}
+                                onFocus={() => setSlotPickerFocused(true)}
+                                onBlur={() => setTimeout(() => setSlotPickerFocused(false), 180)}
+                                onChange={(e) => {
+                                  setSlotSearchDirty(true);
+                                  setEditForm({
+                                    ...editForm,
+                                    course: e.target.value,
+                                    title: "",
+                                  });
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const parsed = parseCourseInputTokens(editForm.course);
+                                    const topMatch = slotSearchOptions[0];
+                                    if (topMatch && (parsed.length === 0 || topMatch.code === parsed[0])) {
+                                      void applySlotCourse(
+                                        slot.id,
+                                        topMatch.code,
+                                        topMatch.cr || "",
+                                        topMatch.title || ""
+                                      );
+                                    } else if (parsed.length > 0) {
+                                      void applySlotCourse(slot.id, parsed[0]);
+                                    } else {
+                                      void saveEditSlot(slot.id);
+                                    }
+                                  } else if (e.key === "Escape") {
+                                    setEditingSlotId(null);
+                                  }
+                                }}
+                                placeholder="Search code, title, or AP (e.g. ENGL 1100F, AP Lit)..."
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-white placeholder-zinc-500 focus:border-sky-500 focus:outline-none"
+                              />
+
+                              {slotPickerFocused &&
+                                slotSearchDirty &&
+                                editForm.course.trim() &&
+                                slotSearchOptions.length > 0 && (
+                                  <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-48 overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-1 shadow-2xl">
+                                    {slotSearchOptions.map((opt) => (
+                                      <button
+                                        key={opt.code}
+                                        type="button"
+                                        onMouseDown={(e) => {
+                                          e.preventDefault();
+                                          void applySlotCourse(
+                                            slot.id,
+                                            opt.code,
+                                            opt.cr || "",
+                                            opt.title || ""
+                                          );
+                                        }}
+                                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                                      >
+                                        <span className="truncate">
+                                          <span className="font-mono font-semibold text-white">
+                                            {opt.code}
+                                          </span>
+                                          {opt.title ? (
+                                            <span className="ml-2 text-zinc-400">{opt.title}</span>
+                                          ) : null}
+                                        </span>
+                                        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-sky-400">
+                                          {opt.cr ? `${opt.cr} cr` : ""}
+                                          <Plus className="h-3 w-3" />
+                                        </span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                            </div>
                             <input
                               type="text"
                               value={editForm.cr}
                               onChange={(e) => setEditForm({ ...editForm, cr: e.target.value })}
-                              placeholder="Cr (e.g. 4)"
+                              placeholder="Cr (auto)"
                               className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-white"
                             />
                             <input
@@ -847,7 +1391,33 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                               placeholder="Gr (A)"
                               className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-white"
                             />
-                            <div className="flex justify-end gap-1.5">
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                              <span className="text-zinc-400">Save as:</span>
+                              {(
+                                [
+                                  { id: "taken", label: "Taken", active: "bg-emerald-500 text-zinc-950 font-semibold" },
+                                  { id: "taking", label: "Currently Taking", active: "bg-amber-500 text-zinc-950 font-semibold" },
+                                  { id: "box", label: "This Box Only", active: "bg-zinc-200 text-zinc-950 font-semibold" },
+                                ] as const
+                              ).map((mode) => (
+                                <button
+                                  key={mode.id}
+                                  type="button"
+                                  onClick={() => setEditSaveMode(mode.id)}
+                                  className={`rounded-md border px-2 py-0.5 transition ${
+                                    editSaveMode === mode.id
+                                      ? `border-transparent ${mode.active}`
+                                      : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white"
+                                  }`}
+                                >
+                                  {mode.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex items-center gap-1.5">
                               <button
                                 type="button"
                                 onClick={() => setEditingSlotId(null)}
@@ -857,8 +1427,9 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                               </button>
                               <button
                                 type="button"
+                                disabled={saving}
                                 onClick={() => void saveEditSlot(slot.id)}
-                                className="rounded-lg bg-emerald-500 px-2.5 py-1 font-semibold text-zinc-950 hover:bg-emerald-400"
+                                className="rounded-lg bg-emerald-500 px-2.5 py-1 font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
                               >
                                 Save
                               </button>
@@ -868,24 +1439,44 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                       );
                     }
 
+                    const isInProgress = slot.filled && slot.source === "in_progress";
                     const isWhatIf = slot.filled && slot.source === "schedule";
+                    const isWaived = Boolean(slot.waived || slot.source === "waived");
 
                     return (
                       <div
                         key={slot.id}
                         className={`flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-xs transition ${
-                          !slot.filled
-                            ? isSelected
-                              ? "bg-emerald-500/15"
-                              : "hover:bg-zinc-800/40"
-                            : isWhatIf
-                              ? "bg-sky-500/5"
-                              : ""
+                          isWaived
+                            ? "bg-zinc-950/40 opacity-55"
+                            : !slot.filled
+                              ? isSelected
+                                ? "bg-emerald-500/15"
+                                : "hover:bg-zinc-800/40"
+                              : isInProgress
+                                ? "bg-amber-500/5"
+                                : isWhatIf
+                                  ? "bg-sky-500/5"
+                                  : ""
                         }`}
                       >
                         {/* Left: Checkbox / Slot Box */}
                         <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                          {!slot.filled ? (
+                          {isWaived ? (
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800/70 text-zinc-400">
+                                <Minus className="h-3 w-3" />
+                              </span>
+                              <div className="min-w-0">
+                                <div className="font-semibold text-zinc-400 line-through">
+                                  {slot.label}
+                                </div>
+                                <div className="text-[11px] text-zinc-500">
+                                  Waived — satisfied by {slot.waived_by || "2000+ language course"}
+                                </div>
+                              </div>
+                            </div>
+                          ) : !slot.filled ? (
                             <button
                               type="button"
                               onClick={() => toggleEmptySlotSelect(slot)}
@@ -908,12 +1499,16 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                             <div className="flex min-w-0 items-center gap-2.5">
                               <span
                                 className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
-                                  isWhatIf
-                                    ? "border-dashed border-sky-400 bg-sky-500/20 text-sky-300"
-                                    : "border-emerald-500/60 bg-emerald-500/20 text-emerald-300"
+                                  isInProgress
+                                    ? "border-amber-400/70 bg-amber-500/20 text-amber-300"
+                                    : isWhatIf
+                                      ? "border-dashed border-sky-400 bg-sky-500/20 text-sky-300"
+                                      : "border-emerald-500/60 bg-emerald-500/20 text-emerald-300"
                                 }`}
                               >
-                                {isWhatIf ? (
+                                {isInProgress ? (
+                                  <Clock className="h-3 w-3" />
+                                ) : isWhatIf ? (
                                   <CalendarCheck2 className="h-3 w-3" />
                                 ) : (
                                   <Check className="h-3.5 w-3.5" />
@@ -928,6 +1523,12 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                                       — {slot.title}
                                     </span>
                                   )}
+                                  {isInProgress && (
+                                    <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
+                                      Currently Taking
+                                      {slot.sem && slot.sem.toUpperCase() !== "TAKING" ? ` (${slot.sem})` : ""}
+                                    </span>
+                                  )}
                                   {isWhatIf && (
                                     <span className="rounded border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-200">
                                       What-If ({slot.sem})
@@ -938,38 +1539,64 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                                       {slot.cr} cr
                                     </span>
                                   )}
+                                  {!isWhatIf &&
+                                    !isInProgress &&
+                                    slot.sem &&
+                                    slot.sem.toUpperCase() !== "DONE" && (
+                                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                                        {slot.sem}
+                                      </span>
+                                    )}
                                   {slot.gr && (
-                                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                                    <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
                                       {slot.gr}
                                     </span>
                                   )}
                                 </div>
+                                {slot.warning && (
+                                  <div className="mt-1 inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
+                                    <AlertTriangle className="h-3 w-3 shrink-0 text-amber-300" />
+                                    <span>{slot.warning}</span>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           )}
                         </div>
 
-                        {/* Right: Quick Search / Edit / Clear actions */}
+                        {/* Right: Quick Search / Add Taken / Edit / Clear actions */}
                         <div className="flex items-center gap-1.5">
-                          {!slot.filled && (
+                          {!slot.filled && !isWaived ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => onLaunchSearch(buildPresetFromSlots([slot], "any"))}
+                                className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20"
+                                title={`Find courses satisfying ${slot.label}`}
+                              >
+                                <Search className="h-3 w-3" />
+                                Find
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => startEditSlot(slot)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/35 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-200 hover:bg-sky-500/20"
+                                title={`Pick or add a course you took into ${slot.label}`}
+                              >
+                                <Plus className="h-3 w-3" />
+                                Add
+                              </button>
+                            </>
+                          ) : (
                             <button
                               type="button"
-                              onClick={() => onLaunchSearch(buildPresetFromSlots([slot], "any"))}
-                              className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20"
-                              title={`Find courses satisfying ${slot.label}`}
+                              onClick={() => startEditSlot(slot)}
+                              className="rounded-lg border border-zinc-700/80 p-1 text-zinc-400 hover:text-white"
+                              title="Pick a different course or edit credits, semester, grade"
                             >
-                              <Search className="h-3 w-3" />
-                              Find
+                              <Edit3 className="h-3 w-3" />
                             </button>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => startEditSlot(slot)}
-                            className="rounded-lg border border-zinc-700/80 p-1 text-zinc-400 hover:text-white"
-                            title="Manually enter or edit course, credits, semester, grade"
-                          >
-                            <Edit3 className="h-3 w-3" />
-                          </button>
                           {slot.filled && (
                             <button
                               type="button"
@@ -986,7 +1613,8 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
                   })}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )
       )}
@@ -999,6 +1627,10 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
         majorMode={user.major_mode || "cs"}
         showCsFeatures={true}
         onClose={() => setPrereqsOpen(false)}
+        onOpenTranscriptImport={() => {
+          setPrereqsOpen(false);
+          setTranscriptOpen(true);
+        }}
         onSaved={(res) => {
           onUserUpdated?.({
             ...user,
@@ -1010,6 +1642,27 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
           }
         }}
       />
+
+      {transcriptOpen && (
+        <TranscriptImportModal
+          rosters={rosters}
+          activeRoster={selectedRoster}
+          existingCompleted={checklist?.completed_courses || user.completed_courses || []}
+          existingDetails={checklist?.completed_course_details || user.completed_course_details || {}}
+          onClose={() => setTranscriptOpen(false)}
+          onImported={(_, nextChecklist) => {
+            setChecklist(nextChecklist);
+            setDraftSlots(nextChecklist.manual_slots || {});
+            onUserUpdated?.({
+              ...user,
+              completed_courses: nextChecklist.completed_courses,
+              completed_course_details: nextChecklist.completed_course_details,
+              in_progress_courses: nextChecklist.in_progress_courses,
+              in_progress_course_details: nextChecklist.in_progress_course_details,
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

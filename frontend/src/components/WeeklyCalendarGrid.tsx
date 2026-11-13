@@ -6,6 +6,7 @@ import type {
   ScheduleCourseItem,
   ScheduleSection,
 } from "../types";
+import { getCourseEffectiveMetrics } from "../utils/scheduleInsights";
 import {
   extractSectionSlots,
   formatMinutesFull,
@@ -43,6 +44,7 @@ interface GridEvent {
   isLocked?: boolean;
   isConflict: boolean;
   tightWalkWarning?: string;
+  difficulty?: number | null;
 }
 
 interface PositionedEvent extends GridEvent {
@@ -50,15 +52,17 @@ interface PositionedEvent extends GridEvent {
   totalCols: number;
 }
 
-function layoutDayEvents(events: GridEvent[]): PositionedEvent[] {
+function layoutDayEvents<T extends { startMin: number; endMin: number }>(
+  events: T[]
+): Array<T & { col: number; totalCols: number }> {
   if (events.length === 0) return [];
   const sorted = [...events].sort(
     (a, b) => a.startMin - b.startMin || a.endMin - b.endMin
   );
 
   // Connected overlap clusters
-  const clusters: GridEvent[][] = [];
-  let currentCluster: GridEvent[] = [];
+  const clusters: T[][] = [];
+  let currentCluster: T[] = [];
   let clusterEnd = -1;
 
   for (const ev of sorted) {
@@ -73,10 +77,10 @@ function layoutDayEvents(events: GridEvent[]): PositionedEvent[] {
   }
   if (currentCluster.length > 0) clusters.push(currentCluster);
 
-  const positioned: PositionedEvent[] = [];
+  const positioned: Array<T & { col: number; totalCols: number }> = [];
   for (const cluster of clusters) {
     const colEndTimes: number[] = [];
-    const assigned: Array<{ ev: GridEvent; col: number }> = [];
+    const assigned: Array<{ ev: T; col: number }> = [];
 
     for (const ev of cluster) {
       let colIdx = colEndTimes.findIndex((end) => end <= ev.startMin);
@@ -145,6 +149,11 @@ interface SwapAlternativeGhost {
   room: string;
 }
 
+interface PositionedSwapGhost extends SwapAlternativeGhost {
+  col: number;
+  totalCols: number;
+}
+
 const HOUR_HEIGHT_PX = 54;
 
 export function WeeklyCalendarGrid({
@@ -176,6 +185,7 @@ export function WeeklyCalendarGrid({
     tbaSections,
     swapInfo,
     swapGhostsByDay,
+    activeHoverPreview,
   } = useMemo(() => {
     const activeCourses = courses.filter((c) => c.enabled);
     const activeBlocks = blocks.filter((b) => b.enabled);
@@ -220,41 +230,56 @@ export function WeeklyCalendarGrid({
       );
     }
 
+    const seenUids = new Set<string>();
+    const makeUniqueUid = (base: string): string => {
+      if (!seenUids.has(base)) {
+        seenUids.add(base);
+        return base;
+      }
+      let idx = 2;
+      while (seenUids.has(`${base}-${idx}`)) idx += 1;
+      const next = `${base}-${idx}`;
+      seenUids.add(next);
+      return next;
+    };
+
     for (const course of activeCourses) {
       const selectedSet = new Set(course.selected_class_nbrs);
       const lockedSet = new Set(course.locked_class_nbrs);
+      const effMetrics = getCourseEffectiveMetrics(course);
+      const courseLabel = `${course.subject} ${course.catalog_nbr}`;
       for (const eg of course.enroll_groups) {
         for (const sec of eg.sections) {
           if (!selectedSet.has(sec.class_nbr)) continue;
-          if (sec.meetings.length === 0) {
+          const slots = extractSectionSlots(courseLabel, sec);
+          if (slots.length === 0) {
             tba.push({ course, section: sec });
             continue;
           }
-          for (const mtg of sec.meetings) {
-            minM = Math.min(minM, mtg.start_min);
-            maxM = Math.max(maxM, mtg.end_min);
-            for (const day of mtg.days) {
-              const walkNote = walkMap.get(
-                `${day}|${course.subject} ${course.catalog_nbr}|${mtg.start_min}`
-              );
-              rawEvents.push({
-                uid: `c-${course.id}-${sec.class_nbr}-${day}-${mtg.start_min}`,
-                kind: "course",
-                day,
-                startMin: mtg.start_min,
-                endMin: mtg.end_min,
-                title: `${course.subject} ${course.catalog_nbr}`,
-                subtitle: `${sec.ssr_component} ${sec.section}`,
-                room: mtg.facility_descr || sec.instruction_mode || "",
-                openStatus: sec.open_status,
-                colorIdx: course.color_idx,
-                classNbr: sec.class_nbr,
-                courseItemId: course.id,
-                isLocked: lockedSet.has(sec.class_nbr),
-                isConflict: diagnostics.conflictingClassNbrs.has(sec.class_nbr),
-                tightWalkWarning: walkNote,
-              });
-            }
+          for (const sl of slots) {
+            minM = Math.min(minM, sl.start_min);
+            maxM = Math.max(maxM, sl.end_min);
+            const walkNote = walkMap.get(`${sl.day}|${courseLabel}|${sl.start_min}`);
+            rawEvents.push({
+              uid: makeUniqueUid(
+                `c-${course.id}-${sec.class_nbr}-${sl.day}-${sl.start_min}-${sl.end_min}`
+              ),
+              kind: "course",
+              day: sl.day,
+              startMin: sl.start_min,
+              endMin: sl.end_min,
+              title: courseLabel,
+              subtitle: `${sec.ssr_component} ${sec.section}`,
+              room: sl.facility_descr || sec.instruction_mode || "",
+              openStatus: sec.open_status,
+              colorIdx: course.color_idx,
+              classNbr: sec.class_nbr,
+              courseItemId: course.id,
+              isLocked: lockedSet.has(sec.class_nbr),
+              isConflict: diagnostics.conflictingClassNbrs.has(sec.class_nbr),
+              tightWalkWarning: walkNote,
+              difficulty: effMetrics.difficulty,
+            });
           }
         }
       }
@@ -280,8 +305,13 @@ export function WeeklyCalendarGrid({
       }
     }
 
-    if (hoverPreview) {
-      for (const mtg of hoverPreview.section.meetings) {
+    const scopedHoverPreview =
+      hoverPreview && activeCourses.some((c) => c.id === hoverPreview.course.id)
+        ? hoverPreview
+        : null;
+
+    if (scopedHoverPreview) {
+      for (const mtg of scopedHoverPreview.section.meetings) {
         minM = Math.min(minM, mtg.start_min);
         maxM = Math.max(maxM, mtg.end_min);
       }
@@ -296,13 +326,13 @@ export function WeeklyCalendarGrid({
       map.set(d.code, layoutDayEvents(dayRaw));
     }
 
-    // F4: Click-a-block ghost alternative preview
+    // F4: Click-a-block ghost alternative preview (searches across ALL enrollGroups for that component)
     let resolvedSwapInfo: {
       course: ScheduleCourseItem;
       targetSection: ScheduleSection;
       altCount: number;
     } | null = null;
-    const ghostsByDay = new Map<DayCode, SwapAlternativeGhost[]>();
+    const ghostsByDay = new Map<DayCode, PositionedSwapGhost[]>();
     if (!readOnly && swapFocus) {
       const targetCourse = activeCourses.find((c) => c.id === swapFocus.courseItemId);
       let targetEgIdx: number | null = null;
@@ -318,10 +348,11 @@ export function WeeklyCalendarGrid({
         }
       }
       if (targetCourse && targetSec && targetEgIdx !== null) {
-        const occupiedOther: TimeSlot[] = [];
+        const occupiedExternal: TimeSlot[] = [];
+        const occupiedSameCourseOther: TimeSlot[] = [];
         for (const b of activeBlocks) {
           for (const day of b.days) {
-            occupiedOther.push({
+            occupiedExternal.push({
               day,
               start_min: b.start_min,
               end_min: b.end_min,
@@ -335,47 +366,61 @@ export function WeeklyCalendarGrid({
             for (const s of eg.sections) {
               if (!chosen.has(s.class_nbr)) continue;
               if (c.id === targetCourse.id && s.class_nbr === targetSec.class_nbr) continue;
+              const dest =
+                c.id === targetCourse.id ? occupiedSameCourseOther : occupiedExternal;
               for (const sl of extractSectionSlots(
                 `${c.subject} ${c.catalog_nbr}`,
                 s
               )) {
-                occupiedOther.push(sl);
+                dest.push(sl);
               }
             }
           }
         }
 
-        const egObj = targetCourse.enroll_groups.find(
-          (eg) => eg.enroll_group_idx === targetEgIdx
-        );
-        const alternatives = (egObj?.sections || []).filter(
-          (s) =>
-            s.ssr_component === targetSec!.ssr_component &&
-            s.class_nbr !== targetSec!.class_nbr
-        );
-        for (const alt of alternatives) {
-          const conflicts = sectionOverlapsSlots(alt, occupiedOther);
-          for (const mtg of alt.meetings) {
-            minM = Math.min(minM, mtg.start_min);
-            maxM = Math.max(maxM, mtg.end_min);
-            for (const day of mtg.days) {
-              const arr = ghostsByDay.get(day) || [];
+        const rawGhostsByDay = new Map<DayCode, SwapAlternativeGhost[]>();
+        const seenAltNbrs = new Set<number>();
+        let altCount = 0;
+        for (const eg of targetCourse.enroll_groups) {
+          for (const alt of eg.sections) {
+            if (
+              alt.ssr_component !== targetSec.ssr_component ||
+              alt.class_nbr === targetSec.class_nbr ||
+              seenAltNbrs.has(alt.class_nbr)
+            ) {
+              continue;
+            }
+            seenAltNbrs.add(alt.class_nbr);
+            altCount += 1;
+            const sameGroup = eg.enroll_group_idx === targetEgIdx;
+            const slotsToCheck = sameGroup
+              ? [...occupiedExternal, ...occupiedSameCourseOther]
+              : occupiedExternal;
+            const conflicts = sectionOverlapsSlots(alt, slotsToCheck);
+            const altLabel = `${targetCourse.subject} ${targetCourse.catalog_nbr}`;
+            for (const sl of extractSectionSlots(altLabel, alt)) {
+              minM = Math.min(minM, sl.start_min);
+              maxM = Math.max(maxM, sl.end_min);
+              const arr = rawGhostsByDay.get(sl.day) || [];
               arr.push({
                 section: alt,
-                day,
-                startMin: mtg.start_min,
-                endMin: mtg.end_min,
+                day: sl.day,
+                startMin: sl.start_min,
+                endMin: sl.end_min,
                 conflicts,
-                room: mtg.facility_descr || alt.instruction_mode || "",
+                room: sl.facility_descr || alt.instruction_mode || "",
               });
-              ghostsByDay.set(day, arr);
+              rawGhostsByDay.set(sl.day, arr);
             }
           }
+        }
+        for (const [day, list] of rawGhostsByDay.entries()) {
+          ghostsByDay.set(day, layoutDayEvents(list));
         }
         resolvedSwapInfo = {
           course: targetCourse,
           targetSection: targetSec,
-          altCount: alternatives.length,
+          altCount,
         };
       }
     }
@@ -391,6 +436,7 @@ export function WeeklyCalendarGrid({
       tbaSections: tba,
       swapInfo: resolvedSwapInfo,
       swapGhostsByDay: ghostsByDay,
+      activeHoverPreview: scopedHoverPreview,
     };
   }, [courses, blocks, diagnostics, hoverPreview, swapFocus, readOnly]);
 
@@ -457,7 +503,7 @@ export function WeeklyCalendarGrid({
               ? `click any dashed block below to switch (${swapInfo.altCount} alternative${
                   swapInfo.altCount === 1 ? "" : "s"
                 })`
-              : "no other section options in this enrollment group"}
+              : "no other section times for this component"}
           </span>
           {onClearSwapFocus && (
             <button
@@ -555,8 +601,12 @@ export function WeeklyCalendarGrid({
             {/* Day Columns */}
             {shownDays.map((d) => {
               const dayEvents = eventsByDay.get(d.code) || [];
-              const ghostMeetings =
-                hoverPreview?.section.meetings.filter((m) => m.days.includes(d.code)) || [];
+              const ghostMeetings = activeHoverPreview
+                ? extractSectionSlots(
+                    `${activeHoverPreview.course.subject} ${activeHoverPreview.course.catalog_nbr}`,
+                    activeHoverPreview.section
+                  ).filter((sl) => sl.day === d.code)
+                : [];
 
               return (
                 <div
@@ -675,8 +725,8 @@ export function WeeklyCalendarGrid({
                         title={`${ev.title} (${ev.subtitle}) #${ev.classNbr}\n${formatMinutesFull(
                           ev.startMin
                         )} – ${formatMinutesFull(ev.endMin)}${ev.room ? `\n${ev.room}` : ""}${
-                          ev.tightWalkWarning ? `\n⚠ ${ev.tightWalkWarning}` : ""
-                        }`}
+                          ev.difficulty != null ? `\nDifficulty: ${ev.difficulty.toFixed(1)}/5` : ""
+                        }${ev.tightWalkWarning ? `\n⚠ ${ev.tightWalkWarning}` : ""}`}
                         style={{
                           top: `${topPct}%`,
                           height: `${heightPct}%`,
@@ -718,6 +768,7 @@ export function WeeklyCalendarGrid({
                           </div>
                           <div className="truncate text-[10px] opacity-90">
                             {ev.subtitle}
+                            {ev.difficulty != null ? ` · Diff ${ev.difficulty.toFixed(1)}` : ""}
                             {isCompact ? ` · ${formatMinutesShort(ev.startMin)}` : ""}
                           </div>
                         </div>
@@ -735,7 +786,7 @@ export function WeeklyCalendarGrid({
                   })}
 
                   {/* Ghost Hover-Preview Layer */}
-                  {hoverPreview &&
+                  {activeHoverPreview &&
                     ghostMeetings.map((mtg, idx) => {
                       const topPct = ((mtg.start_min - gridStartMin) / totalMinutes) * 100;
                       const heightPct = Math.max(
@@ -752,17 +803,17 @@ export function WeeklyCalendarGrid({
                             width: "calc(100% - 6px)",
                           }}
                           className={`pointer-events-none absolute z-20 rounded-lg border-2 border-dashed px-1.5 py-1 backdrop-blur-[1px] ${
-                            hoverPreview.conflicts
+                            activeHoverPreview.conflicts
                               ? "border-rose-400 bg-rose-500/25 text-rose-100"
                               : "border-emerald-300 bg-emerald-500/25 text-emerald-50"
                           }`}
                         >
                           <div className="truncate text-[11px] font-bold">
-                            {hoverPreview.course.subject} {hoverPreview.course.catalog_nbr}{" "}
-                            {hoverPreview.section.ssr_component} {hoverPreview.section.section}
+                            {activeHoverPreview.course.subject} {activeHoverPreview.course.catalog_nbr}{" "}
+                            {activeHoverPreview.section.ssr_component} {activeHoverPreview.section.section}
                           </div>
                           <div className="truncate text-[9px]">
-                            {hoverPreview.conflicts ? "Conflicts with schedule" : "Preview · fits cleanly"}
+                            {activeHoverPreview.conflicts ? "Conflicts with schedule" : "Preview · fits cleanly"}
                           </div>
                         </div>
                       );
@@ -776,6 +827,8 @@ export function WeeklyCalendarGrid({
                         3.2,
                         ((g.endMin - g.startMin) / totalMinutes) * 100
                       );
+                      const ghostWidthPct = 100 / g.totalCols;
+                      const ghostLeftPct = g.col * ghostWidthPct;
                       return (
                         <button
                           key={`swap-ghost-${g.section.class_nbr}-${gIdx}`}
@@ -793,8 +846,8 @@ export function WeeklyCalendarGrid({
                           style={{
                             top: `${topPct}%`,
                             height: `${heightPct}%`,
-                            left: "4px",
-                            width: "calc(100% - 8px)",
+                            left: `calc(${ghostLeftPct}% + 2px)`,
+                            width: `calc(${ghostWidthPct}% - 4px)`,
                           }}
                           className={`absolute z-30 flex flex-col justify-between overflow-hidden rounded-lg border-2 border-dashed px-1.5 py-1 text-left shadow-lg backdrop-blur-sm transition hover:scale-[1.01] ${
                             g.conflicts

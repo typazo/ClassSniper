@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Literal, Optional
 
 import orjson
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.api.schemas import (
     CompletedPrereqsRequest,
+    ImportTranscriptRequest,
     RefreshSubjectsRequest,
     SyncCatalogRequest,
     UpdateCsChecklistRequest,
@@ -19,11 +21,28 @@ from app.auth import get_current_user, get_db
 from app.db import Database
 from app.services.attributes import extract_course_attributes
 from app.services.catalog import CatalogSyncService
-from app.services.cs_checklist import build_cs_checklist_payload
-from app.services.cs_requirements import normalize_completed_courses
+from app.services.cs_checklist import build_cs_checklist_payload, merge_transcript_into_user_checklist
+from app.services.cs_requirements import (
+    decode_completed_course_details,
+    decode_completed_courses,
+    normalize_completed_courses,
+    normalize_course_code,
+    normalize_course_detail,
+)
 from app.services.insights import CourseInsightsService, build_external_links
+from app.services.scheduler import SchedulerService
 
 router = APIRouter(prefix="/api", tags=["courses"])
+
+_REGULAR_ROSTER_RE = re.compile(r"^(?:FA|SP|WI|SU)\d{2}$")
+_SEASON_ORDER = {"WI": 0, "SP": 1, "SU": 2, "FA": 3}
+
+
+def _roster_sort_key(slug: str) -> tuple[int, int, str]:
+    s = slug.strip().upper()
+    if len(s) == 4 and s[:2] in _SEASON_ORDER and s[2:].isdigit():
+        return (int(s[2:]), _SEASON_ORDER[s[:2]], s)
+    return (9999, 9, s)
 
 
 def get_catalog(request: Request) -> CatalogSyncService:
@@ -32,6 +51,10 @@ def get_catalog(request: Request) -> CatalogSyncService:
 
 def get_insights(request: Request) -> CourseInsightsService:
     return request.app.state.insights
+
+
+def get_scheduler(request: Request) -> SchedulerService:
+    return request.app.state.scheduler
 
 
 @router.get("/rosters")
@@ -129,7 +152,12 @@ async def search_courses(
         or user.get("major_mode") == "ilr"
     )
 
-    completed_courses = list(user.get("completed_courses") or [])
+    completed_courses = normalize_completed_courses(
+        [
+            *list(user.get("completed_courses") or []),
+            *list(user.get("in_progress_courses") or []),
+        ]
+    )
     effective_implied = (
         bool(user.get("include_implied_prereqs", True))
         if include_implied_prereqs is None
@@ -351,20 +379,46 @@ async def update_user_prereqs(
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
     completed = list(body.completed_courses)
+    completed_set = set(completed)
     include_implied = (
         bool(user.get("include_implied_prereqs", True))
         if body.include_implied_prereqs is None
         else bool(body.include_implied_prereqs)
     )
+    row_ip = await db.fetch_one(
+        "SELECT in_progress_courses_json, in_progress_course_details_json FROM users WHERE id = ?",
+        (user["id"],),
+    )
+    remaining_ip = [
+        c
+        for c in decode_completed_courses(row_ip.get("in_progress_courses_json") if row_ip else None)
+        if c not in completed_set
+    ]
+    remaining_ip_set = set(remaining_ip)
+    remaining_ip_details = {
+        k: v
+        for k, v in decode_completed_course_details(
+            row_ip.get("in_progress_course_details_json") if row_ip else None
+        ).items()
+        if k in remaining_ip_set
+    }
     async with db.write_tx() as conn:
         await conn.execute(
             """
             UPDATE users
             SET completed_courses_json = ?,
+                in_progress_courses_json = ?,
+                in_progress_course_details_json = ?,
                 include_implied_prereqs = ?
             WHERE id = ?
             """,
-            (json.dumps(completed), 1 if include_implied else 0, user["id"]),
+            (
+                json.dumps(completed),
+                json.dumps(remaining_ip),
+                json.dumps(remaining_ip_details),
+                1 if include_implied else 0,
+                user["id"],
+            ),
         )
     return await _build_user_prereqs_payload(
         catalog=catalog,
@@ -403,12 +457,15 @@ async def get_cs_checklist(
 ) -> dict[str, Any]:
     target_roster = (roster or await catalog.get_default_roster_slug()).upper()
     cs_index = await catalog.get_cs_requirements_index(target_roster)
-    return await build_cs_checklist_payload(
+    payload = await build_cs_checklist_payload(
         db=db,
         user=user,
         cs_index=cs_index,
         roster=target_roster,
     )
+    if payload.get("missing_metadata_courses"):
+        catalog.queue_historical_course_lookup(payload["missing_metadata_courses"])
+    return payload
 
 
 @router.put("/cs/checklist")
@@ -420,6 +477,72 @@ async def update_cs_checklist(
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
     target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    row = await db.fetch_one(
+        """
+        SELECT completed_courses_json, completed_course_details_json,
+               in_progress_courses_json, in_progress_course_details_json
+        FROM users WHERE id = ?
+        """,
+        (user["id"],),
+    )
+    existing_completed = decode_completed_courses(row.get("completed_courses_json") if row else None)
+    details_map = decode_completed_course_details(row.get("completed_course_details_json") if row else None)
+    existing_in_progress = decode_completed_courses(row.get("in_progress_courses_json") if row else None)
+    in_progress_details_map = decode_completed_course_details(
+        row.get("in_progress_course_details_json") if row else None
+    )
+
+    completed_override: Optional[list[str]] = None
+    active_completed_set = set(existing_completed)
+    if body.sync_completed_courses is not None:
+        completed_override = normalize_completed_courses(body.sync_completed_courses)
+        active_completed_set = set(completed_override)
+
+    in_progress_override: Optional[list[str]] = None
+    if body.sync_in_progress_courses is not None:
+        in_progress_override = [
+            c
+            for c in normalize_completed_courses(body.sync_in_progress_courses)
+            if c not in active_completed_set
+        ]
+    elif completed_override is not None:
+        filtered_ip = [c for c in existing_in_progress if c not in active_completed_set]
+        if filtered_ip != existing_in_progress:
+            in_progress_override = filtered_ip
+
+    active_in_progress_set = set(
+        in_progress_override if in_progress_override is not None else existing_in_progress
+    )
+    in_progress_details_map = {
+        k: v for k, v in in_progress_details_map.items() if k in active_in_progress_set
+    }
+
+    # Persist manual {gr, sem, cr} edits on completed / currently-taking courses into details maps
+    # so grades/terms stay attached across slot swaps and Re-auto-fill.
+    for sl_val in body.slots.values():
+        if sl_val.cleared:
+            continue
+        code = normalize_course_code(sl_val.course)
+        if not code:
+            continue
+        cleaned_edit = normalize_course_detail(
+            {"gr": sl_val.gr, "sem": sl_val.sem, "cr": sl_val.cr}
+        )
+        if not cleaned_edit:
+            continue
+        if code in active_completed_set:
+            cur_det = dict(details_map.get(code) or {})
+            for k, v in cleaned_edit.items():
+                cur_det[k] = v
+            details_map[code] = cur_det
+        elif code in active_in_progress_set:
+            cur_det = dict(in_progress_details_map.get(code) or {})
+            for k, v in cleaned_edit.items():
+                if k in {"sem", "cr"}:
+                    cur_det[k] = v
+            if cur_det:
+                in_progress_details_map[code] = cur_det
+
     serialized = json.dumps(
         {
             "college": body.college,
@@ -429,29 +552,130 @@ async def update_cs_checklist(
             "slots": {k: v.model_dump() for k, v in body.slots.items()},
         }
     )
-    completed_override: Optional[list[str]] = None
     async with db.write_tx() as conn:
-        if body.sync_completed_courses is not None:
-            completed_override = normalize_completed_courses(body.sync_completed_courses)
-            await conn.execute(
-                """
-                UPDATE users
-                SET cs_checklist_json = ?,
-                    completed_courses_json = ?
-                WHERE id = ?
-                """,
-                (serialized, json.dumps(completed_override), user["id"]),
-            )
-        else:
-            await conn.execute(
-                "UPDATE users SET cs_checklist_json = ? WHERE id = ?",
-                (serialized, user["id"]),
-            )
+        await conn.execute(
+            """
+            UPDATE users
+            SET cs_checklist_json = ?,
+                completed_courses_json = ?,
+                completed_course_details_json = ?,
+                in_progress_courses_json = ?,
+                in_progress_course_details_json = ?
+            WHERE id = ?
+            """,
+            (
+                serialized,
+                json.dumps(completed_override if completed_override is not None else existing_completed),
+                json.dumps(details_map),
+                json.dumps(in_progress_override if in_progress_override is not None else existing_in_progress),
+                json.dumps(in_progress_details_map),
+                user["id"],
+            ),
+        )
     cs_index = await catalog.get_cs_requirements_index(target_roster)
-    return await build_cs_checklist_payload(
+    payload = await build_cs_checklist_payload(
         db=db,
         user=user,
         cs_index=cs_index,
         roster=target_roster,
         completed_courses_override=completed_override,
+        completed_details_override=details_map,
+        in_progress_courses_override=in_progress_override,
+        in_progress_details_override=in_progress_details_map,
     )
+    if payload.get("missing_metadata_courses"):
+        catalog.queue_historical_course_lookup(payload["missing_metadata_courses"])
+    return payload
+
+
+@router.post("/cs/checklist/import-transcript")
+async def import_transcript_to_checklist_and_scheduler(
+    body: ImportTranscriptRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+    catalog: CatalogSyncService = Depends(get_catalog),
+    scheduler: SchedulerService = Depends(get_scheduler),
+) -> dict[str, Any]:
+    """Merge privacy-stripped browser-parsed transcript courses into Checklist & Scheduler."""
+    target_roster = (body.roster or await catalog.get_default_roster_slug()).upper()
+    merge_result = await merge_transcript_into_user_checklist(
+        db=db,
+        user_id=int(user["id"]),
+        imported_completed=[item.model_dump() for item in body.completed_courses],
+        pe_completed=body.pe_completed,
+        imported_in_progress=[item.model_dump() for item in body.in_progress_courses],
+        sync_in_progress_to_checklist=body.sync_in_progress_to_checklist,
+    )
+
+    by_roster: dict[str, list[dict[str, str]]] = {}
+    seen_roster_courses: dict[str, set[str]] = {}
+
+    def _queue_for_scheduler(roster_slug: str, course_code: str, cr_val: str) -> None:
+        r_u = roster_slug.strip().upper()
+        c_u = normalize_course_code(course_code) or ""
+        if not r_u or not c_u:
+            return
+        seen_set = seen_roster_courses.setdefault(r_u, set())
+        if c_u in seen_set:
+            return
+        seen_set.add(c_u)
+        by_roster.setdefault(r_u, []).append({"course": c_u, "cr": cr_val})
+
+    for item in body.in_progress_courses:
+        _queue_for_scheduler(item.roster, item.course, item.cr)
+
+    past_by_roster: dict[str, list[dict[str, str]]] = {}
+    if body.sync_completed_to_scheduler:
+        known_rows = await db.fetch_all(
+            "SELECT DISTINCT slug FROM rosters UNION SELECT DISTINCT roster AS slug FROM courses_meta"
+        )
+        known_rosters = {str(r["slug"]).strip().upper() for r in known_rows if r.get("slug")}
+
+        for item in body.past_schedule_courses:
+            r_u = item.roster.strip().upper()
+            if _REGULAR_ROSTER_RE.match(r_u) and (not known_rosters or r_u in known_rosters):
+                past_by_roster.setdefault(r_u, []).append({"course": item.course, "cr": item.cr})
+        for item in body.completed_courses:
+            sem_u = item.sem.strip().upper()
+            if _REGULAR_ROSTER_RE.match(sem_u) and (not known_rosters or sem_u in known_rosters):
+                past_by_roster.setdefault(sem_u, []).append({"course": item.course, "cr": item.cr})
+
+        for r_u, items in past_by_roster.items():
+            for entry in items:
+                _queue_for_scheduler(r_u, entry["course"], entry["cr"])
+
+    scheduler_results: list[dict[str, Any]] = []
+    for r_slug in sorted(by_roster.keys(), key=_roster_sort_key):
+        res = await scheduler.merge_imported_courses(
+            user_id=int(user["id"]),
+            roster=r_slug,
+            courses=by_roster[r_slug],
+        )
+        scheduler_results.append(res)
+
+    cs_index = await catalog.get_cs_requirements_index(target_roster)
+    payload = await build_cs_checklist_payload(
+        db=db,
+        user=user,
+        cs_index=cs_index,
+        roster=target_roster,
+        completed_courses_override=merge_result["completed_courses"],
+        completed_details_override=merge_result["completed_course_details"],
+        in_progress_courses_override=merge_result["in_progress_courses"],
+        in_progress_details_override=merge_result["in_progress_course_details"],
+    )
+    if payload.get("missing_metadata_courses"):
+        catalog.queue_historical_course_lookup(payload["missing_metadata_courses"])
+
+    return {
+        "checklist": payload,
+        "import_summary": {
+            "added_completed": merge_result["added_courses"],
+            "added_in_progress": merge_result["added_in_progress"],
+            "enriched_completed": merge_result["enriched_courses"],
+            "unchanged_completed": merge_result["unchanged_courses"],
+            "enriched_slots": merge_result["enriched_slots"],
+            "pe_completed": merge_result["pe_completed"],
+            "scheduler": scheduler_results,
+        },
+    }

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { ArrowLeftRight, Loader2, X } from "lucide-react";
 import { api } from "../api/client";
 import type { HydratedSchedule, ScheduleCourseItem, ScheduleSummary } from "../types";
+import { summarizeScheduleInsights } from "../utils/scheduleInsights";
 import { computeScheduleDiagnostics } from "../utils/schedulerSolver";
 
 interface Props {
@@ -16,11 +17,7 @@ function summarizePlan(sched: HydratedSchedule) {
   const diag = computeScheduleDiagnostics(enabled, sched.blocks);
   let openSecs = 0;
   let totalSecs = 0;
-  const workloads: number[] = [];
   for (const c of enabled) {
-    if (c.cached_insights?.workload != null) {
-      workloads.push(c.cached_insights.workload);
-    }
     const sel = new Set(c.selected_class_nbrs);
     for (const eg of c.enroll_groups) {
       for (const s of eg.sections) {
@@ -30,11 +27,16 @@ function summarizePlan(sched: HydratedSchedule) {
       }
     }
   }
-  const avgWorkload =
-    workloads.length > 0
-      ? Number((workloads.reduce((a, b) => a + b, 0) / workloads.length).toFixed(1))
-      : null;
-  return { enabled, diag, openSecs, totalSecs, avgWorkload };
+  const insights = summarizeScheduleInsights(enabled);
+  return {
+    enabled,
+    diag,
+    openSecs,
+    totalSecs,
+    avgDifficulty: insights.avgDifficulty,
+    avgWorkload: insights.avgWorkload,
+    semesterLoadScore: insights.semesterLoadScore,
+  };
 }
 
 function formatSelectedSections(course: ScheduleCourseItem): string {
@@ -161,10 +163,12 @@ export function ScheduleDiffModal({ isOpen, active, schedules, onClose }: Props)
                       </div>
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">
-                      <div className="text-[10px] text-zinc-400">Avg Workload</div>
+                      <div className="text-[10px] text-zinc-400">Semester Diff / Work</div>
                       <div className="mt-0.5 font-semibold text-white">
-                        {leftStats.avgWorkload != null ? `${leftStats.avgWorkload}/5` : "—"} vs{" "}
-                        {rightStats.avgWorkload != null ? `${rightStats.avgWorkload}/5` : "—"}
+                        {leftStats.avgDifficulty != null ? `${leftStats.avgDifficulty}/5` : "—"}
+                        {leftStats.avgWorkload != null ? ` (${leftStats.avgWorkload})` : ""} vs{" "}
+                        {rightStats.avgDifficulty != null ? `${rightStats.avgDifficulty}/5` : "—"}
+                        {rightStats.avgWorkload != null ? ` (${rightStats.avgWorkload})` : ""}
                       </div>
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">

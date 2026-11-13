@@ -134,8 +134,14 @@ export interface TimeSlot {
 
 export function extractSectionSlots(courseLabel: string, sec: ScheduleSection): TimeSlot[] {
   const slots: TimeSlot[] = [];
+  const seen = new Set<string>();
   for (const mtg of sec.meetings) {
+    if (mtg.end_min <= mtg.start_min) continue;
     for (const day of mtg.days) {
+      // Cornell sometimes repeats the same weekly slot across multiple date-split meetings
+      const key = `${day}|${mtg.start_min}|${mtg.end_min}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       slots.push({
         day,
         start_min: mtg.start_min,
@@ -223,20 +229,13 @@ export function computeScheduleDiagnostics(
       else if (sec.open_status === "W") waitlistSelectedCount += 1;
 
       const label = `${course.subject} ${course.catalog_nbr} ${sec.ssr_component} ${sec.section}`;
-      for (const mtg of sec.meetings) {
-        for (const day of mtg.days) {
-          allSlots.push({
-            kind: "course",
-            classNbr: sec.class_nbr,
-            label,
-            courseLabel: `${course.subject} ${course.catalog_nbr}`,
-            day,
-            start_min: mtg.start_min,
-            end_min: mtg.end_min,
-            facility_descr: mtg.facility_descr,
-            building_descr: mtg.building_descr,
-          });
-        }
+      for (const sl of extractSectionSlots(`${course.subject} ${course.catalog_nbr}`, sec)) {
+        allSlots.push({
+          ...sl,
+          kind: "course",
+          classNbr: sec.class_nbr,
+          label,
+        });
       }
     }
   }
@@ -436,14 +435,12 @@ function buildSectionTuplesForCourse(
         let selfConflict = false;
         for (const sec of chosen) {
           const secSlots = extractSectionSlots(label, sec);
-          for (const ns of secSlots) {
-            if (slots.some((existing) => slotsOverlap(existing, ns))) {
-              selfConflict = true;
-              break;
-            }
-            slots.push(ns);
+          // Only flag overlaps across distinct components of the same course (not date-split meetings within one section)
+          if (secSlots.some((ns) => slots.some((existing) => slotsOverlap(existing, ns)))) {
+            selfConflict = true;
+            break;
           }
-          if (selfConflict) break;
+          slots.push(...secSlots);
         }
         if (selfConflict) return;
 
@@ -881,6 +878,7 @@ function parsePatternDays(pattern: string): DayCode[] {
 export function parseMeetingsSummaryToSlots(summary: string): SimpleSlot[] {
   if (!summary || summary.trim().toUpperCase() === "TBA") return [];
   const slots: SimpleSlot[] = [];
+  const seen = new Set<string>();
   for (const part of summary.split(";")) {
     const m = part
       .trim()
@@ -891,6 +889,9 @@ export function parseMeetingsSummaryToSlots(summary: string): SimpleSlot[] {
     const endMin = parseClockMinutes(m[3]);
     if (startMin === null || endMin === null || endMin <= startMin) continue;
     for (const day of days) {
+      const key = `${day}|${startMin}|${endMin}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       slots.push({ day, startMin, endMin });
     }
   }
@@ -921,11 +922,8 @@ export function buildScheduleOccupiedIntervals(
     for (const eg of c.enroll_groups) {
       for (const sec of eg.sections) {
         if (!chosenSet.has(sec.class_nbr)) continue;
-        for (const mtg of sec.meetings) {
-          if (mtg.end_min <= mtg.start_min) continue;
-          for (const day of mtg.days) {
-            occupied.push({ day, startMin: mtg.start_min, endMin: mtg.end_min });
-          }
+        for (const sl of extractSectionSlots(key, sec)) {
+          occupied.push({ day: sl.day, startMin: sl.start_min, endMin: sl.end_min });
         }
       }
     }
@@ -997,4 +995,52 @@ export function evaluateCourseFitsSchedule(
   }
 
   return { fits: anyGroupFits, compatibleClassNbrs };
+}
+
+/** Compute updated selected_class_nbrs when choosing targetSection across same or different enrollGroups. */
+export function selectSectionInCourse(
+  course: ScheduleCourseItem,
+  targetSection: ScheduleSection
+): number[] {
+  const targetEg = course.enroll_groups.find(
+    (eg) => eg.enroll_group_idx === targetSection.enroll_group_idx
+  );
+  if (!targetEg) return [targetSection.class_nbr];
+
+  const reqComps =
+    targetEg.components_required.length > 0
+      ? targetEg.components_required
+      : Array.from(new Set(targetEg.sections.map((s) => s.ssr_component).filter(Boolean)));
+
+  const egNbrMap = new Map<number, ScheduleSection>();
+  for (const s of targetEg.sections) {
+    egNbrMap.set(s.class_nbr, s);
+  }
+
+  // Keep any currently selected sections that already belong to targetEg for other components
+  const byComp = new Map<string, number>();
+  for (const nbr of course.selected_class_nbrs) {
+    const existing = egNbrMap.get(nbr);
+    if (existing && existing.ssr_component !== targetSection.ssr_component) {
+      byComp.set(existing.ssr_component, existing.class_nbr);
+    }
+  }
+  byComp.set(targetSection.ssr_component, targetSection.class_nbr);
+
+  // Fill any missing required components in targetEg
+  for (const comp of reqComps) {
+    if (byComp.has(comp)) continue;
+    const candidates = targetEg.sections
+      .filter((s) => s.ssr_component === comp)
+      .sort((a, b) => {
+        const rA = a.open_status === "O" ? 0 : a.open_status === "W" ? 1 : 2;
+        const rB = b.open_status === "O" ? 0 : b.open_status === "W" ? 1 : 2;
+        return rA - rB || a.class_nbr - b.class_nbr;
+      });
+    if (candidates.length > 0) {
+      byComp.set(comp, candidates[0].class_nbr);
+    }
+  }
+
+  return Array.from(byComp.values());
 }

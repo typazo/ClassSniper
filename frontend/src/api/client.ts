@@ -15,6 +15,8 @@ import type {
   HydratedSchedule,
   IlrMatchMode,
   IlrSummaryResponse,
+  ImportTranscriptRequest,
+  ImportTranscriptResponse,
   InviteItem,
   MajorMode,
   MetricsResponse,
@@ -184,6 +186,7 @@ export const api = {
       pe_completed: number;
       slots: Record<string, CsChecklistSlotInput>;
       sync_completed_courses?: string[];
+      sync_in_progress_courses?: string[];
     },
     roster?: string
   ) =>
@@ -194,6 +197,11 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
+  importTranscript: (payload: ImportTranscriptRequest) =>
+    request<ImportTranscriptResponse>("/api/cs/checklist/import-transcript", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   getCatalogStatus: (roster: string) =>
     request<CatalogStatus>(`/api/catalog/status?roster=${encodeURIComponent(roster)}`),
   getIlrSummary: (roster: string, ithacaOrVirtual = true, syncPriority = false) => {

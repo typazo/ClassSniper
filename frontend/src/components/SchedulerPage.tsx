@@ -13,6 +13,7 @@ import {
   Image,
   Link2,
   Loader2,
+  Lock,
   Plus,
   RefreshCw,
   Search,
@@ -35,9 +36,11 @@ import type {
   User,
 } from "../types";
 import { downloadScheduleICS } from "../utils/icsExport";
-import { downloadSchedulePNG } from "../utils/pngExport";
+import { copySchedulePNG } from "../utils/pngExport";
+import { summarizeScheduleInsights } from "../utils/scheduleInsights";
 import {
   computeScheduleDiagnostics,
+  selectSectionInCourse,
   type GeneratedScheduleCandidate,
 } from "../utils/schedulerSolver";
 import { ScheduleCourseSidebar } from "./ScheduleCourseSidebar";
@@ -93,6 +96,9 @@ export function SchedulerPage({
   const [renameText, setRenameText] = useState("");
   const [showSharePanel, setShowSharePanel] = useState(false);
   const [copiedShareUrl, setCopiedShareUrl] = useState(false);
+  const [copiedPng, setCopiedPng] = useState(false);
+  const autoInsightsAttemptedRef = useRef<Set<string>>(new Set());
+  const rosterLoadSeqRef = useRef(0);
 
   // Quick course add search
   const [quickQuery, setQuickQuery] = useState("");
@@ -109,20 +115,37 @@ export function SchedulerPage({
     }, 4000);
   }, []);
 
+  const resetTransientUiState = useCallback(() => {
+    setHoverPreview(null);
+    setSwapFocus(null);
+    setExpandedCourseId(null);
+    setPreviewCandidate(null);
+    setShowGenerator(false);
+    setRenaming(false);
+    setShowNewForm(false);
+    setQuickResults([]);
+  }, []);
+
   const loadSchedulesForRoster = useCallback(async (targetRoster?: string) => {
+    const reqSeq = ++rosterLoadSeqRef.current;
+    resetTransientUiState();
     setLoading(true);
     setErrorMsg(null);
     try {
       const res = await api.listSchedules(targetRoster);
+      if (reqSeq !== rosterLoadSeqRef.current) return;
       setRoster(res.roster);
       setSchedules(res.schedules);
       setActive(res.active);
     } catch (err) {
+      if (reqSeq !== rosterLoadSeqRef.current) return;
       setErrorMsg(err instanceof Error ? err.message : "Failed to load schedules");
     } finally {
-      setLoading(false);
+      if (reqSeq === rosterLoadSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, []);
+  }, [resetTransientUiState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,13 +204,64 @@ export function SchedulerPage({
     });
   }, [lastCatalogRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-fetch missing CU Reviews & RMP difficulty/ratings once per course when a schedule opens
+  useEffect(() => {
+    if (!active || active.courses.length === 0 || loadingBatchInsights) return;
+    const schedId = active.schedule.id;
+    const missing = active.courses.filter((c) => {
+      const key = `${schedId}:${c.subject}:${c.catalog_nbr}`;
+      if (autoInsightsAttemptedRef.current.has(key)) return false;
+      return c.cached_insights === null && Object.keys(c.cached_rmp || {}).length === 0;
+    });
+    if (missing.length === 0) return;
+
+    for (const c of missing) {
+      autoInsightsAttemptedRef.current.add(`${schedId}:${c.subject}:${c.catalog_nbr}`);
+    }
+
+    let cancelled = false;
+    setLoadingBatchInsights(true);
+    api
+      .batchLoadScheduleInsights(schedId, false)
+      .then((res) => {
+        if (cancelled) return;
+        setActive((cur) => (cur && cur.schedule.id === schedId ? res : cur));
+      })
+      .catch(() => {
+        // Silent background fetch; manual button remains available
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingBatchInsights(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isTranscriptSchedule = Boolean(active?.schedule.is_transcript);
+
+  const activeRosterObj = useMemo(
+    () => rosters.find((r) => r.slug === roster) || null,
+    [rosters, roster]
+  );
+  const isArchivedRoster = Boolean(activeRosterObj?.archive_mode === 1);
+  const currentRosters = useMemo(
+    () => rosters.filter((r) => r.archive_mode !== 1),
+    [rosters]
+  );
+  const archivedRosters = useMemo(
+    () => rosters.filter((r) => r.archive_mode === 1),
+    [rosters]
+  );
+
   // Quick search debounce
   useEffect(() => {
     if (quickDebounceRef.current) {
       window.clearTimeout(quickDebounceRef.current);
     }
     const trimmed = quickQuery.trim();
-    if (!trimmed || !roster) {
+    if (!trimmed || !roster || isTranscriptSchedule) {
       setQuickResults([]);
       setQuickLoading(false);
       return;
@@ -231,26 +305,11 @@ export function SchedulerPage({
     [displayedCourses, active?.blocks]
   );
 
-  // Average CU Reviews rating/workload across courses that have cached insights
-  const insightsSummary = useMemo(() => {
-    const enabled = displayedCourses.filter((c) => c.enabled);
-    const ratings = enabled
-      .map((c) => c.cached_insights?.rating)
-      .filter((v): v is number => typeof v === "number");
-    const workloads = enabled
-      .map((c) => c.cached_insights?.workload)
-      .filter((v): v is number => typeof v === "number");
-    return {
-      avgRating:
-        ratings.length > 0
-          ? ratings.reduce((a, b) => a + b, 0) / ratings.length
-          : null,
-      avgWorkload:
-        workloads.length > 0
-          ? workloads.reduce((a, b) => a + b, 0) / workloads.length
-          : null,
-    };
-  }, [displayedCourses]);
+  // Semester-wide CU Reviews & RMP difficulty, workload, and rating summary
+  const insightsSummary = useMemo(
+    () => summarizeScheduleInsights(displayedCourses),
+    [displayedCourses]
+  );
 
   const closedOrWaitlistSelected = useMemo(() => {
     const out: Array<{ course: ScheduleCourseItem; section: ScheduleSection }> = [];
@@ -269,12 +328,11 @@ export function SchedulerPage({
   }, [displayedCourses]);
 
   const handleSelectSchedule = async (scheduleId: number) => {
+    resetTransientUiState();
     try {
       const res = await api.updateSchedule(scheduleId, { is_active: true });
       setSchedules(res.schedules);
       setActive(res.active);
-      setExpandedCourseId(null);
-      setShowGenerator(false);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to switch schedule");
     }
@@ -289,14 +347,39 @@ export function SchedulerPage({
         name: newName.trim(),
         duplicate_from_id: duplicateCurrent && active ? active.schedule.id : undefined,
       });
+      resetTransientUiState();
       setSchedules(res.schedules);
       setActive(res.active);
       setNewName("");
-      setShowNewForm(false);
-      setShowGenerator(false);
       showToast(`Created schedule "${res.active.schedule.name}"`);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to create schedule");
+    }
+  };
+
+  const handleDuplicateToEditablePlan = async () => {
+    if (!active || !roster) return;
+    const existingNames = new Set(schedules.map((s) => s.name.trim().toLowerCase()));
+    let candidateName = !existingNames.has("main schedule")
+      ? "Main Schedule"
+      : "Editable Plan";
+    let suffix = 2;
+    while (existingNames.has(candidateName.toLowerCase())) {
+      candidateName = `Editable Plan ${suffix}`;
+      suffix += 1;
+    }
+    try {
+      const res = await api.createSchedule({
+        roster,
+        name: candidateName,
+        duplicate_from_id: active.schedule.id,
+      });
+      resetTransientUiState();
+      setSchedules(res.schedules);
+      setActive(res.active);
+      showToast(`Created editable copy "${res.active.schedule.name}"`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to duplicate schedule");
     }
   };
 
@@ -323,9 +406,9 @@ export function SchedulerPage({
     }
     try {
       const res = await api.deleteSchedule(active.schedule.id, roster);
+      resetTransientUiState();
       setSchedules(res.schedules);
       setActive(res.active);
-      setExpandedCourseId(null);
       showToast("Schedule deleted");
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to delete schedule");
@@ -412,13 +495,29 @@ export function SchedulerPage({
     if (!active) return;
     const target = active.courses.find((c) => c.id === courseItemId);
     if (!target) return;
-    const nextSelected = target.selected_class_nbrs.map((nbr) =>
-      nbr === oldClassNbr ? newClassNbr : nbr
-    );
+    let newSection: ScheduleSection | null = null;
+    for (const eg of target.enroll_groups) {
+      const found = eg.sections.find((s) => s.class_nbr === newClassNbr);
+      if (found) {
+        newSection = found;
+        break;
+      }
+    }
+    const nextSelected = newSection
+      ? selectSectionInCourse(target, newSection)
+      : target.selected_class_nbrs.map((nbr) => (nbr === oldClassNbr ? newClassNbr : nbr));
+    const nextSelectedSet = new Set(nextSelected);
     const nextLocked = target.locked_class_nbrs.includes(oldClassNbr)
-      ? target.locked_class_nbrs.map((nbr) => (nbr === oldClassNbr ? newClassNbr : nbr))
-      : target.locked_class_nbrs;
+      ? Array.from(
+          new Set(
+            target.locked_class_nbrs
+              .map((nbr) => (nbr === oldClassNbr ? newClassNbr : nbr))
+              .filter((nbr) => nextSelectedSet.has(nbr))
+          )
+        )
+      : target.locked_class_nbrs.filter((nbr) => nextSelectedSet.has(nbr));
     setSwapFocus(null);
+    setHoverPreview(null);
     await handleUpdateCourse(courseItemId, {
       selected_class_nbrs: nextSelected,
       locked_class_nbrs: nextLocked,
@@ -431,7 +530,7 @@ export function SchedulerPage({
     setLoadingBatchInsights(true);
     setErrorMsg(null);
     try {
-      const res = await api.batchLoadScheduleInsights(active.schedule.id, false);
+      const res = await api.batchLoadScheduleInsights(active.schedule.id, true);
       setActive(res);
       const count = res.insights_fetched_count ?? 0;
       showToast(
@@ -591,15 +690,43 @@ export function SchedulerPage({
               }}
               className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-zinc-100"
             >
-              {rosters.map((r) => (
-                <option key={r.slug} value={r.slug}>
-                  {r.descr} ({r.slug})
-                </option>
-              ))}
+              {currentRosters.length > 0 && archivedRosters.length > 0 ? (
+                <>
+                  <optgroup label="Current &amp; Upcoming">
+                    {currentRosters.map((r) => (
+                      <option key={r.slug} value={r.slug}>
+                        {r.descr} ({r.slug})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Past Semesters">
+                    {archivedRosters.map((r) => (
+                      <option key={r.slug} value={r.slug}>
+                        {r.descr} ({r.slug})
+                      </option>
+                    ))}
+                  </optgroup>
+                </>
+              ) : (
+                rosters.map((r) => (
+                  <option key={r.slug} value={r.slug}>
+                    {r.descr} ({r.slug})
+                  </option>
+                ))
+              )}
             </select>
 
+            {isArchivedRoster && (
+              <span
+                title="Historical semester from Cornell Roster archive"
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-medium text-zinc-400"
+              >
+                Past Term
+              </span>
+            )}
+
             {/* Schedule Switcher */}
-            {active && !renaming && (
+            {active && (!renaming || isTranscriptSchedule) && (
               <select
                 value={active.schedule.id}
                 onChange={(e) => void handleSelectSchedule(Number(e.target.value))}
@@ -607,14 +734,25 @@ export function SchedulerPage({
               >
                 {schedules.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.course_count ?? 0})
+                    {s.name}
+                    {s.is_transcript ? " [Locked]" : ""}
                   </option>
                 ))}
               </select>
             )}
 
+            {isTranscriptSchedule && (
+              <span
+                title="Courses are locked to your imported transcript. You can still swap sections, pin times, add busy blocks, and run Auto-Generate."
+                className="inline-flex items-center gap-1 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-semibold text-sky-200"
+              >
+                <Lock className="h-3 w-3" />
+                Transcript
+              </span>
+            )}
+
             {/* Rename inline */}
-            {active && renaming && (
+            {active && renaming && !isTranscriptSchedule && (
               <form onSubmit={handleRenameSubmit} className="flex items-center gap-1.5">
                 <input
                   type="text"
@@ -654,17 +792,19 @@ export function SchedulerPage({
 
             {active && (
               <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRenameText(active.schedule.name);
-                    setRenaming(true);
-                  }}
-                  title="Rename schedule"
-                  className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-                >
-                  <Edit3 className="h-3.5 w-3.5" />
-                </button>
+                {!isTranscriptSchedule && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenameText(active.schedule.name);
+                      setRenaming(true);
+                    }}
+                    title="Rename schedule"
+                    className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  >
+                    <Edit3 className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 {schedules.length > 1 && (
                   <button
                     type="button"
@@ -725,7 +865,7 @@ export function SchedulerPage({
               </button>
             </div>
 
-            {closedOrWaitlistSelected.length > 0 && (
+            {!isArchivedRoster && closedOrWaitlistSelected.length > 0 && (
               <button
                 type="button"
                 disabled={watchBusyKey === "all-missing"}
@@ -769,15 +909,41 @@ export function SchedulerPage({
             <button
               type="button"
               disabled={!active || displayedCourses.length === 0}
-              onClick={() =>
-                active &&
-                downloadSchedulePNG(active, displayedCourses, active.blocks)
-              }
-              title="Export calendar grid as a crisp PNG image"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+              onClick={() => {
+                if (!active) return;
+                void copySchedulePNG(active, displayedCourses, active.blocks).then(
+                  (outcome) => {
+                    if (outcome === "copied") {
+                      setCopiedPng(true);
+                      window.setTimeout(() => setCopiedPng(false), 2000);
+                      showToast(
+                        "Copied schedule PNG to clipboard — ready to paste into Discord, iMessage, or email"
+                      );
+                    } else if (outcome === "shared") {
+                      showToast("Opened share sheet with schedule PNG");
+                    } else if (outcome === "downloaded") {
+                      showToast(
+                        "Clipboard image copy unavailable here — downloaded PNG instead"
+                      );
+                    } else if (outcome === "failed") {
+                      setErrorMsg("Failed to copy schedule PNG");
+                    }
+                  }
+                );
+              }}
+              title="Copy schedule grid PNG directly to clipboard for Discord, iMessage, or email"
+              className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition disabled:opacity-40 ${
+                copiedPng
+                  ? "border-emerald-500/60 bg-emerald-500/20 text-emerald-200"
+                  : "border-zinc-700 text-zinc-200 hover:bg-zinc-800"
+              }`}
             >
-              <Image className="h-3.5 w-3.5" />
-              PNG
+              {copiedPng ? (
+                <Check className="h-3.5 w-3.5 text-emerald-300" />
+              ) : (
+                <Image className="h-3.5 w-3.5" />
+              )}
+              {copiedPng ? "Copied PNG" : "Copy PNG"}
             </button>
 
             <button
@@ -955,14 +1121,46 @@ export function SchedulerPage({
               {displayedCourses.filter((c) => c.enabled).length} Active Course
               {displayedCourses.filter((c) => c.enabled).length === 1 ? "" : "s"}
             </span>
-            {insightsSummary.avgRating != null && (
+            {insightsSummary.semesterTier && insightsSummary.semesterLoadScore != null && (
               <>
                 <span className="text-zinc-500">&middot;</span>
-                <span className="text-sky-300">
-                  Avg CU Rating {insightsSummary.avgRating.toFixed(1)}
-                  {insightsSummary.avgWorkload != null
-                    ? ` · Workload ${insightsSummary.avgWorkload.toFixed(1)}/5`
-                    : ""}
+                <span
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 font-semibold ${insightsSummary.semesterTier.badgeClass}`}
+                  title={`Semester Difficulty factors credit-weighted difficulty (${insightsSummary.avgDifficulty ?? "—"}/5), workload (${insightsSummary.avgWorkload ?? "—"}/5), and total credits (${diagnostics.totalCredits} cr) across ${insightsSummary.ratedDifficultyCount}/${insightsSummary.enabledCount} rated active courses`}
+                >
+                  Semester Difficulty: {insightsSummary.semesterTier.label} (
+                  {insightsSummary.semesterLoadScore.toFixed(1)}/5)
+                </span>
+              </>
+            )}
+            {(insightsSummary.avgDifficulty != null ||
+              insightsSummary.avgWorkload != null ||
+              insightsSummary.avgRating != null) && (
+              <>
+                <span className="text-zinc-500">&middot;</span>
+                <span className="text-zinc-300">
+                  {[
+                    insightsSummary.avgDifficulty != null
+                      ? `Avg Diff ${insightsSummary.avgDifficulty.toFixed(1)}/5`
+                      : null,
+                    insightsSummary.avgWorkload != null
+                      ? `Workload ${insightsSummary.avgWorkload.toFixed(1)}/5`
+                      : null,
+                    insightsSummary.avgRating != null
+                      ? `★ ${insightsSummary.avgRating.toFixed(1)} CU`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </>
+            )}
+            {loadingBatchInsights && (
+              <>
+                <span className="text-zinc-500">&middot;</span>
+                <span className="inline-flex items-center gap-1 text-zinc-400">
+                  <Loader2 className="h-3 w-3 animate-spin text-sky-400" />
+                  Loading difficulty &amp; ratings...
                 </span>
               </>
             )}
@@ -1055,8 +1253,27 @@ export function SchedulerPage({
         />
       )}
 
-      {/* Quick Course Add Bar */}
-      <div className="relative rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
+      {/* Quick Course Add Bar (or Locked Transcript Notice) */}
+      {isTranscriptSchedule ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/5 px-3.5 py-2.5 text-xs">
+          <div className="flex items-center gap-2 text-zinc-300">
+            <Lock className="h-4 w-4 shrink-0 text-sky-400" />
+            <span>
+              <strong className="text-sky-200">Transcript schedule courses are locked.</strong>{" "}
+              You can still swap <strong className="text-white">LEC / DIS / LAB</strong> sections, pin times, add busy blocks, and run Auto-Generate.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleDuplicateToEditablePlan()}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-sky-500/45 bg-sky-500/15 px-3 py-1.5 font-semibold text-sky-200 hover:bg-sky-500/25"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            Duplicate to Editable Plan
+          </button>
+        </div>
+      ) : (
+        <div className="relative rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-[220px] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
@@ -1127,11 +1344,13 @@ export function SchedulerPage({
           </div>
         )}
       </div>
+      )}
 
       {/* Main Split View: Weekly Grid + Course Sidebar */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         <div className="lg:col-span-8">
           <WeeklyCalendarGrid
+            key={active?.schedule.id ?? "empty"}
             courses={displayedCourses}
             blocks={active?.blocks || []}
             diagnostics={diagnostics}
@@ -1167,9 +1386,12 @@ export function SchedulerPage({
             blocks={active?.blocks || []}
             expandedCourseId={expandedCourseId}
             watchBusyKey={watchBusyKey}
-            onToggleExpand={(itemId) =>
-              setExpandedCourseId((cur) => (cur === itemId ? null : itemId))
-            }
+            isTranscript={isTranscriptSchedule}
+            isArchivedRoster={isArchivedRoster}
+            onToggleExpand={(itemId) => {
+              setHoverPreview(null);
+              setExpandedCourseId((cur) => (cur === itemId ? null : itemId));
+            }}
             onUpdateCourse={(itemId, patch) => void handleUpdateCourse(itemId, patch)}
             onRemoveCourse={(itemId) => void handleRemoveCourse(itemId)}
             onHoverSection={setHoverPreview}

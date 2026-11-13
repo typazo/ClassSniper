@@ -21,8 +21,10 @@ from app.services.attributes import (
     normalize_attr_code,
     summarize_roster_attributes,
 )
+from app.services.cs_checklist import format_credits_range
 from app.services.cs_requirements import (
     PRIORITY_STEM_SUBJECTS,
+    TRANSCRIPT_EQUIVALENT_CATALOG,
     CourseEligibility,
     CSRequirementsIndex,
 )
@@ -106,6 +108,10 @@ class CatalogSyncService:
 
         self._refresh_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=200)
         self._refresh_pending: set[tuple[str, str]] = set()
+        self._historical_lookup_queued: set[str] = set()
+        self._historical_lookup_checked: set[str] = set()
+        self._historical_lookup_task: Optional[asyncio.Task[None]] = None
+        self._workers_started = False
         self._stop_event = asyncio.Event()
         self._refresh_worker_task: Optional[asyncio.Task[None]] = None
         self._warmup_worker_task: Optional[asyncio.Task[None]] = None
@@ -127,6 +133,7 @@ class CatalogSyncService:
     def start_workers(self) -> None:
         """Start lazy visible-subject refresh consumer and STEM-first background warmer."""
         self._stop_event.clear()
+        self._workers_started = True
         if self._refresh_worker_task is None or self._refresh_worker_task.done():
             self._refresh_worker_task = asyncio.create_task(
                 self._refresh_worker_loop(),
@@ -137,10 +144,22 @@ class CatalogSyncService:
                 self._warmup_worker_loop(),
                 name="catalog-stem-warmup",
             )
+        if self._historical_lookup_queued and (
+            self._historical_lookup_task is None or self._historical_lookup_task.done()
+        ):
+            self._historical_lookup_task = asyncio.create_task(
+                self._historical_lookup_runner(),
+                name="catalog-historical-lookup",
+            )
 
     async def stop_workers(self) -> None:
         self._stop_event.set()
-        for task in (self._refresh_worker_task, self._warmup_worker_task):
+        self._workers_started = False
+        for task in (
+            self._refresh_worker_task,
+            self._warmup_worker_task,
+            self._historical_lookup_task,
+        ):
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -149,6 +168,7 @@ class CatalogSyncService:
                     pass
         self._refresh_worker_task = None
         self._warmup_worker_task = None
+        self._historical_lookup_task = None
 
     def _get_subject_lock(self, roster: str, subject: str) -> asyncio.Lock:
         key = (roster.upper(), subject.upper())
@@ -577,6 +597,205 @@ class CatalogSyncService:
         finally:
             self.status["warmup_active"] = False
         return synced
+
+    _REGULAR_ROSTER_RE = re.compile(r"^(FA|SP)(\d{2})$")
+    _COURSE_CODE_RE = re.compile(r"^([A-Za-z]{2,8})\s+(\d{3,4}[A-Za-z]?)$")
+
+    def queue_historical_course_lookup(self, codes: list[str]) -> list[str]:
+        """Queue missing completed/planned courses for polite background historical roster lookup."""
+        queued: list[str] = []
+        for raw in codes:
+            cleaned = " ".join(str(raw or "").strip().upper().split())
+            m = self._COURSE_CODE_RE.match(cleaned)
+            if not m:
+                continue
+            code = f"{m.group(1)} {m.group(2)}"
+            if (
+                code in TRANSCRIPT_EQUIVALENT_CATALOG
+                or code in self._historical_lookup_checked
+                or code in self._historical_lookup_queued
+            ):
+                continue
+            if len(self._historical_lookup_queued) >= 200:
+                break
+            self._historical_lookup_queued.add(code)
+            queued.append(code)
+
+        if (
+            queued
+            and self._workers_started
+            and (self._historical_lookup_task is None or self._historical_lookup_task.done())
+        ):
+            self._historical_lookup_task = asyncio.create_task(
+                self._historical_lookup_runner(),
+                name="catalog-historical-lookup",
+            )
+        return queued
+
+    async def _historical_lookup_runner(self) -> None:
+        try:
+            await self.process_historical_course_lookup()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Historical course lookup runner error: %s", exc)
+
+    async def _load_regular_rosters_desc(self) -> list[str]:
+        rows = await self.db.fetch_all("SELECT slug, strm FROM rosters")
+        matches: list[tuple[int, int, str, str]] = []
+        for r in rows:
+            slug = str(r["slug"] or "").upper()
+            m = self._REGULAR_ROSTER_RE.match(slug)
+            if not m:
+                continue
+            term = m.group(1)
+            yr = int(m.group(2))
+            matches.append((yr, 1 if term == "FA" else 0, str(r["strm"] or ""), slug))
+
+        if len(matches) < 4:
+            try:
+                async with self._acquire_fetch_slot(priority=PRIORITY_WARMUP, min_interval_sec=1.15):
+                    rosters = await self.provider.fetch_rosters()
+                async with self.db.write_tx() as conn:
+                    for r in rosters:
+                        await conn.execute(
+                            """
+                            INSERT INTO rosters (slug, descr, is_default, archive_mode, strm, last_modified_dttm, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                            ON CONFLICT(slug) DO UPDATE SET
+                                descr = excluded.descr,
+                                is_default = excluded.is_default,
+                                archive_mode = excluded.archive_mode,
+                                strm = excluded.strm,
+                                last_modified_dttm = excluded.last_modified_dttm,
+                                updated_at = datetime('now')
+                            """,
+                            (
+                                r.slug,
+                                r.descr,
+                                1 if r.is_default else 0,
+                                1 if r.archive_mode else 0,
+                                r.strm,
+                                r.last_modified_dttm,
+                            ),
+                        )
+                rows = await self.db.fetch_all("SELECT slug, strm FROM rosters")
+                matches = []
+                for r in rows:
+                    slug = str(r["slug"] or "").upper()
+                    m = self._REGULAR_ROSTER_RE.match(slug)
+                    if not m:
+                        continue
+                    matches.append((int(m.group(2)), 1 if m.group(1) == "FA" else 0, str(r["strm"] or ""), slug))
+            except (RateLimitedError, UpstreamUnavailableError) as exc:
+                logger.debug("Historical roster list refresh skipped: %s", exc)
+
+        matches.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+        return [item[3] for item in matches]
+
+    async def process_historical_course_lookup(self, max_rosters_per_subject: int = 8) -> dict[str, Any]:
+        """Search recent Fall/Spring rosters at PRIORITY_WARMUP for uncached checklist courses."""
+        resolved: list[str] = []
+        synced_buckets = 0
+        rate_limited = False
+
+        while self._historical_lookup_queued and not self._stop_event.is_set() and not rate_limited:
+            batch = sorted(self._historical_lookup_queued)
+            by_subj: dict[str, set[str]] = {}
+            for code in batch:
+                subj, nbr = code.split(" ", 1)
+                row = await self.db.fetch_one(
+                    "SELECT 1 FROM courses_meta WHERE subject = ? AND catalog_nbr = ? LIMIT 1",
+                    (subj, nbr),
+                )
+                if row is not None:
+                    self._historical_lookup_queued.discard(code)
+                    resolved.append(code)
+                    continue
+                by_subj.setdefault(subj, set()).add(nbr)
+
+            if not by_subj:
+                break
+
+            candidate_rosters = (await self._load_regular_rosters_desc())[:max_rosters_per_subject]
+            for subj, target_nbrs in sorted(by_subj.items()):
+                if self._stop_event.is_set() or rate_limited:
+                    break
+                if not candidate_rosters:
+                    break
+
+                synced_rows = await self.db.fetch_all(
+                    "SELECT roster, synced_at FROM subjects WHERE value = ? AND synced_at IS NOT NULL",
+                    (subj,),
+                )
+                already_synced = {str(r["roster"]).upper() for r in synced_rows}
+                had_transient_failure = False
+
+                for roster_slug in candidate_rosters:
+                    if self._stop_event.is_set() or not target_nbrs:
+                        break
+                    if roster_slug in already_synced:
+                        continue
+                    while not self._refresh_queue.empty() and not self._stop_event.is_set():
+                        await asyncio.sleep(0.5)
+                    if self.gate is not None and self.gate.has_active_poller():
+                        await asyncio.sleep(2.0)
+
+                    try:
+                        did_sync = await self.ensure_subject_synced(
+                            roster_slug,
+                            subj,
+                            force=False,
+                            priority=PRIORITY_WARMUP,
+                            min_interval_sec=1.25,
+                            emit_sse=False,
+                        )
+                        if did_sync:
+                            synced_buckets += 1
+                    except RateLimitedError:
+                        rate_limited = True
+                        had_transient_failure = True
+                        await asyncio.sleep(2.0)
+                        break
+                    except UpstreamUnavailableError as exc:
+                        logger.debug("Historical lookup skipped %s %s: %s", roster_slug, subj, exc)
+                        had_transient_failure = True
+                        continue
+
+                    found_nbrs = await self.db.fetch_all(
+                        "SELECT DISTINCT catalog_nbr FROM courses_meta WHERE roster = ? AND subject = ?",
+                        (roster_slug, subj),
+                    )
+                    present_in_roster = {str(r["catalog_nbr"]).upper() for r in found_nbrs}
+                    newly_found = sorted(nbr for nbr in target_nbrs if nbr in present_in_roster)
+                    if newly_found:
+                        found_codes = [f"{subj} {nbr}" for nbr in newly_found]
+                        for nbr in newly_found:
+                            target_nbrs.discard(nbr)
+                            self._historical_lookup_queued.discard(f"{subj} {nbr}")
+                        resolved.extend(found_codes)
+                        if self.sse_hub is not None:
+                            self.sse_hub.publish(
+                                "catalog_subject_refreshed",
+                                {
+                                    "roster": roster_slug,
+                                    "subject": subj,
+                                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                                    "courses_count": len(present_in_roster),
+                                    "section_statuses": {},
+                                    "historical_lookup": True,
+                                    "resolved_courses": found_codes,
+                                },
+                            )
+
+                if target_nbrs and not rate_limited and not had_transient_failure:
+                    for nbr in list(target_nbrs):
+                        code = f"{subj} {nbr}"
+                        self._historical_lookup_queued.discard(code)
+                        if len(self._historical_lookup_checked) < 2000:
+                            self._historical_lookup_checked.add(code)
+
+        return {"resolved": resolved, "synced_buckets": synced_buckets}
 
     async def _warmup_worker_loop(self) -> None:
         # Let uvicorn & initial user requests settle for 2s before starting background warm-up
@@ -1422,6 +1641,7 @@ class CatalogSyncService:
                             "subject": key[0],
                             "catalog_nbr": key[1],
                             "title": row.get("title_long") or row.get("title_short") or "",
+                            "cr": format_credits_range(row.get("units_min"), row.get("units_max")),
                             "crosslists": _decode_json_list(row.get("crosslists_json", "[]")),
                         }
                     )
@@ -1437,7 +1657,7 @@ class CatalogSyncService:
             subj_qmarks = ", ".join("?" for _ in default_subjects)
             default_rows = await self.db.fetch_all(
                 f"""
-                SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                SELECT subject, catalog_nbr, title_short, title_long, units_min, units_max, crosslists_json
                 FROM courses_meta
                 WHERE roster = ?
                   AND subject IN ({subj_qmarks})
@@ -1451,7 +1671,7 @@ class CatalogSyncService:
             if len(rows) < limit:
                 fallback_rows = await self.db.fetch_all(
                     """
-                    SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                    SELECT subject, catalog_nbr, title_short, title_long, units_min, units_max, crosslists_json
                     FROM courses_meta
                     WHERE roster = ?
                       AND catalog_num BETWEEN 1000 AND 4999
@@ -1463,11 +1683,40 @@ class CatalogSyncService:
                 _append_rows(fallback_rows)
             return rows[:limit]
 
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", query_clean)]
+        if tokens:
+            equiv_matches: list[dict[str, Any]] = []
+            for eq in TRANSCRIPT_EQUIVALENT_CATALOG.values():
+                haystack = " ".join(
+                    [
+                        str(eq["code"]),
+                        str(eq["subject"]),
+                        str(eq["catalog_nbr"]),
+                        str(eq["title_short"]),
+                        str(eq["title_long"]),
+                        " ".join(eq.get("keywords") or ()),
+                    ]
+                ).lower()
+                if all(tok in haystack for tok in tokens):
+                    equiv_matches.append(
+                        {
+                            "subject": eq["subject"],
+                            "catalog_nbr": eq["catalog_nbr"],
+                            "title_short": eq["title_short"],
+                            "title_long": eq["title_long"],
+                            "units_min": eq["units_min"],
+                            "units_max": eq["units_max"],
+                            "crosslists_json": "[]",
+                        }
+                    )
+            if equiv_matches:
+                _append_rows(equiv_matches)
+
         fts_expr = build_fts_query(query_clean)
         if fts_expr:
             fts_rows = await self.db.fetch_all(
                 """
-                SELECT cm.subject, cm.catalog_nbr, cm.title_short, cm.title_long, cm.crosslists_json
+                SELECT cm.subject, cm.catalog_nbr, cm.title_short, cm.title_long, cm.units_min, cm.units_max, cm.crosslists_json
                 FROM courses_fts
                 JOIN courses_meta cm
                   ON cm.roster = courses_fts.roster
@@ -1481,7 +1730,6 @@ class CatalogSyncService:
             )
             _append_rows(fts_rows)
 
-        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", query_clean)]
         if tokens and len(rows) < limit:
             clauses: list[str] = []
             params: list[Any] = []
@@ -1493,7 +1741,7 @@ class CatalogSyncService:
             params.extend([roster_u, limit * 2])
             like_rows = await self.db.fetch_all(
                 f"""
-                SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                SELECT subject, catalog_nbr, title_short, title_long, units_min, units_max, crosslists_json
                 FROM courses_meta
                 WHERE {' AND '.join(clauses)}
                 ORDER BY CASE WHEN roster = ? THEN 0 ELSE 1 END, subject, catalog_num, catalog_nbr

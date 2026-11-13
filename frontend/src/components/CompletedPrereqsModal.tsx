@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Check, CheckCircle2, Loader2, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { Check, CheckCircle2, FileUp, Loader2, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
 import type { MajorMode, PrereqCourseOption, UserPrereqsResponse } from "../types";
 
@@ -12,6 +12,7 @@ interface Props {
   showCsFeatures?: boolean;
   onClose: () => void;
   onSaved: (res: UserPrereqsResponse) => void;
+  onOpenTranscriptImport?: () => void;
 }
 
 const PRESET_BUNDLES: Array<{
@@ -187,6 +188,7 @@ export function CompletedPrereqsModal({
   showCsFeatures = true,
   onClose,
   onSaved,
+  onOpenTranscriptImport,
 }: Props) {
   const effectiveMode: MajorMode = majorMode ?? (showCsFeatures ? "cs" : "none");
   const quickToggleCourses =
@@ -352,19 +354,33 @@ export function CompletedPrereqsModal({
               <span className="font-semibold text-zinc-200">
                 Selected Courses ({selectedCourses.length})
               </span>
-              {selectedCourses.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDirty(true);
-                    setSelectedCourses([]);
-                  }}
-                  className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-rose-300"
-                >
-                  <Trash2 className="h-3 w-3" />
-                  Clear all
-                </button>
-              )}
+              <div className="flex items-center gap-1.5">
+                {onOpenTranscriptImport && (
+                  <button
+                    type="button"
+                    onClick={onOpenTranscriptImport}
+                    disabled={saving}
+                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
+                    title="Parse Cornell Unofficial Transcript PDF/text locally in your browser"
+                  >
+                    <FileUp className="h-3 w-3" />
+                    Import Transcript
+                  </button>
+                )}
+                {selectedCourses.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDirty(true);
+                      setSelectedCourses([]);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-rose-300"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Clear all
+                  </button>
+                )}
+              </div>
             </div>
 
             {selectedCourses.length === 0 ? (

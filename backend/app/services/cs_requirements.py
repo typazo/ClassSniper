@@ -266,6 +266,169 @@ STATIC_EQUIVALENT_GROUPS: tuple[tuple[str, ...], ...] = (
     ("ORIE 3510", "STSCI 3510"),
 )
 
+# Cornell transcript placeholder / AP / transfer codes that are never listed on live Class Rosters
+TRANSCRIPT_EQUIVALENT_CATALOG: dict[str, dict[str, Any]] = {
+    "ENGL 1100F": {
+        "code": "ENGL 1100F",
+        "subject": "ENGL",
+        "catalog_nbr": "1100F",
+        "title_short": "English FWS AP Credit",
+        "title_long": "English FWS AP Credit (AP Lit / Lang)",
+        "units_min": 3.0,
+        "units_max": 3.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": ["FWS"],
+        "crse_attrs_json": '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FWS)"}]',
+        "keywords": (
+            "ap lit",
+            "ap literature",
+            "ap english",
+            "english literature",
+            "english language",
+            "fws",
+            "ap fws",
+            "1100f",
+        ),
+    },
+    "ENGL 1101A": {
+        "code": "ENGL 1101A",
+        "subject": "ENGL",
+        "catalog_nbr": "1101A",
+        "title_short": "English AP Credit (Score 4)",
+        "title_long": "English AP Credit (Score 4 · Liberal Studies)",
+        "units_min": 3.0,
+        "units_max": 3.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": ["LA-AG"],
+        "crse_attrs_json": '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(LA-AG)"}]',
+        "keywords": (
+            "ap english",
+            "ap lang",
+            "ap lit",
+            "english language",
+            "1101a",
+        ),
+    },
+    "BIOG 1101F": {
+        "code": "BIOG 1101F",
+        "subject": "BIOG",
+        "catalog_nbr": "1101F",
+        "title_short": "Biology AP Credit (Score 4)",
+        "title_long": "Biological Sciences AP Credit (Score 4)",
+        "units_min": 4.0,
+        "units_max": 4.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": [],
+        "crse_attrs_json": "[]",
+        "keywords": (
+            "ap bio",
+            "ap biology",
+            "biology",
+            "1101f",
+        ),
+    },
+    "BIOG 1102F": {
+        "code": "BIOG 1102F",
+        "subject": "BIOG",
+        "catalog_nbr": "1102F",
+        "title_short": "Biology AP Credit (Score 5)",
+        "title_long": "Biological Sciences AP Credit (Score 5)",
+        "units_min": 8.0,
+        "units_max": 8.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": [],
+        "crse_attrs_json": "[]",
+        "keywords": (
+            "ap bio",
+            "ap biology",
+            "biology",
+            "1102f",
+        ),
+    },
+    "MATH 1710": {
+        "code": "MATH 1710",
+        "subject": "MATH",
+        "catalog_nbr": "1710",
+        "title_short": "Statistical Thry & Application",
+        "title_long": "Statistical Theory & Application (AP Statistics Credit)",
+        "units_min": 4.0,
+        "units_max": 4.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": [],
+        "crse_attrs_json": "[]",
+        "keywords": (
+            "ap stat",
+            "ap stats",
+            "ap statistics",
+            "statistics",
+            "statistical",
+            "1710",
+        ),
+    },
+    "SPAN 1100C": {
+        "code": "SPAN 1100C",
+        "subject": "SPAN",
+        "catalog_nbr": "1100C",
+        "title_short": "Spanish AP / Exam Credit",
+        "title_long": "Spanish AP / Placement Credit",
+        "units_min": 3.0,
+        "units_max": 3.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": ["FL-AG"],
+        "crse_attrs_json": '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FL-AG)"}]',
+        "keywords": (
+            "ap spanish",
+            "spanish",
+            "case",
+            "1100c",
+        ),
+    },
+    "FREN 1100C": {
+        "code": "FREN 1100C",
+        "subject": "FREN",
+        "catalog_nbr": "1100C",
+        "title_short": "French AP / Exam Credit",
+        "title_long": "French AP / Placement Credit",
+        "units_min": 3.0,
+        "units_max": 3.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": ["FL-AG"],
+        "crse_attrs_json": '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FL-AG)"}]',
+        "keywords": (
+            "ap french",
+            "french",
+            "case",
+            "1100c",
+        ),
+    },
+    "ITAL 1100C": {
+        "code": "ITAL 1100C",
+        "subject": "ITAL",
+        "catalog_nbr": "1100C",
+        "title_short": "Italian AP / Exam Credit",
+        "title_long": "Italian AP / Placement Credit",
+        "units_min": 3.0,
+        "units_max": 3.0,
+        "acad_career": "UG",
+        "acad_group": "AS",
+        "attrs": ["FL-AG"],
+        "crse_attrs_json": '[{"attrDescr":"Distribution Requirements","crseAttrValues":"(FL-AG)"}]',
+        "keywords": (
+            "ap italian",
+            "italian",
+            "case",
+            "1100c",
+        ),
+    },
+}
+
 # Clear upward sequential intro foundations implied when a student completed the subsequent course (or placed via AP)
 IMPLICIT_PREREQ_MAP: dict[str, tuple[str, ...]] = {
     "CS 2110": ("CS 1110",),
@@ -440,6 +603,83 @@ def decode_completed_courses(raw_json: Optional[str]) -> list[str]:
     except (TypeError, ValueError):
         pass
     return []
+
+
+_PLACEHOLDER_SEMESTERS: frozenset[str] = frozenset({"", "DONE", "TAKING"})
+_PLACEHOLDER_GRADES: frozenset[str] = frozenset({"", "IP", "INP", "NGR"})
+
+
+def normalize_course_detail(raw: Any) -> dict[str, str]:
+    """Normalize optional {gr, sem, cr} metadata for a completed course."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    gr = str(raw.get("gr") or "").strip()[:12]
+    sem = str(raw.get("sem") or "").strip()[:16]
+    cr = str(raw.get("cr") or "").strip()[:12]
+    if gr:
+        out["gr"] = gr
+    if sem and sem.upper() not in ("DONE", "TAKING"):
+        out["sem"] = sem
+    if cr:
+        out["cr"] = cr
+    return out
+
+
+def decode_completed_course_details(raw_json: Any) -> dict[str, dict[str, str]]:
+    """Safely parse persisted JSON map of normalized course code -> {gr, sem, cr}."""
+    if not raw_json:
+        return {}
+    try:
+        loaded = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for raw_code, raw_val in loaded.items():
+        norm = normalize_course_code(str(raw_code))
+        if not norm:
+            continue
+        cleaned = normalize_course_detail(raw_val)
+        if cleaned:
+            out[norm] = cleaned
+    return out
+
+
+def merge_course_detail_fields(
+    existing: dict[str, str],
+    incoming: dict[str, str],
+) -> tuple[dict[str, str], bool]:
+    """Enrich missing or placeholder {gr, sem, cr} fields without clobbering existing values."""
+    merged = dict(existing)
+    changed = False
+
+    inc_gr = str(incoming.get("gr") or "").strip()[:12]
+    inc_sem = str(incoming.get("sem") or "").strip()[:16]
+    inc_cr = str(incoming.get("cr") or "").strip()[:12]
+
+    cur_gr = str(merged.get("gr") or "").strip()
+    if inc_gr and cur_gr.upper() in _PLACEHOLDER_GRADES and inc_gr != cur_gr:
+        merged["gr"] = inc_gr
+        changed = True
+
+    cur_sem = str(merged.get("sem") or "").strip()
+    if (
+        inc_sem
+        and inc_sem.upper() not in ("DONE", "TAKING")
+        and cur_sem.upper() in _PLACEHOLDER_SEMESTERS
+        and inc_sem != cur_sem
+    ):
+        merged["sem"] = inc_sem
+        changed = True
+
+    cur_cr = str(merged.get("cr") or "").strip()
+    if inc_cr and (not cur_cr or "-" in cur_cr) and inc_cr != cur_cr:
+        merged["cr"] = inc_cr
+        changed = True
+
+    return merged, changed
 
 
 def build_alias_lookup(crosslists_by_code: Optional[dict[str, list[str]]] = None) -> dict[str, set[str]]:
@@ -869,8 +1109,8 @@ def _to_float(val: Any) -> Optional[float]:
         return None
 
 
-def _has_3cr_letter_grade_group(row: dict[str, Any]) -> bool:
-    """Return True if at least one enrollGroup allows >= 3 credits AND letter grading."""
+def _has_min_cr_letter_grade_group(row: dict[str, Any], min_credits: float = 3.0) -> bool:
+    """Return True if at least one enrollGroup allows >= min_credits AND letter grading."""
     raw_egs = row.get("enroll_groups")
     if raw_egs is None and row.get("enroll_groups_json"):
         try:
@@ -889,7 +1129,7 @@ def _has_3cr_letter_grade_group(row: dict[str, Any]) -> bool:
             if gb or u_max is not None:
                 any_structured = True
                 gb_ok = (not gb) or (gb in LETTER_GRADE_BASES)
-                units_ok = (u_max is None) or (u_max >= 3.0)
+                units_ok = (u_max is None) or (u_max >= min_credits)
                 if gb_ok and units_ok:
                     return True
         if any_structured:
@@ -897,8 +1137,13 @@ def _has_3cr_letter_grade_group(row: dict[str, Any]) -> bool:
 
     units_max = float(row.get("units_max") or 0.0)
     has_letter = bool(row.get("has_letter_grade", True))
-    units_ok = (units_max == 0.0) or (units_max >= 3.0)
+    units_ok = (units_max == 0.0) or (units_max >= min_credits)
     return units_ok and has_letter
+
+
+def _has_3cr_letter_grade_group(row: dict[str, Any]) -> bool:
+    """Return True if at least one enrollGroup allows >= 3 credits AND letter grading."""
+    return _has_min_cr_letter_grade_group(row, min_credits=3.0)
 
 
 def _parse_json_list(raw: Any) -> list[str]:
@@ -914,13 +1159,14 @@ def _parse_json_list(raw: Any) -> list[str]:
     return []
 
 
-def _is_non_academic_only(row: dict[str, Any]) -> bool:
+def _is_non_academic_only(row: dict[str, Any], allow_prj: bool = False) -> bool:
     """Detect independent study, research, project team, teaching, or PE credits."""
     subj = str(row.get("subject") or "").upper()
     if subj == "PE":
         return True
     components = _parse_json_list(row.get("components_json") or row.get("components"))
-    if components and set(components).issubset(NON_ACADEMIC_COMPONENTS):
+    disallowed = NON_ACADEMIC_COMPONENTS - {"PRJ"} if allow_prj else NON_ACADEMIC_COMPONENTS
+    if components and set(components).issubset(disallowed):
         return True
     title = str(row.get("title_long") or row.get("title_short") or "")
     if _EXCLUDED_EXT_SPEC_TITLE_RE.search(title):
@@ -1185,14 +1431,16 @@ class CSRequirementsIndex:
                     else:
                         elig.cs_elective_warning = "Allowed only if NOT used for CS Core"
 
+            eligible_2cr_letter = _has_min_cr_letter_grade_group(row, min_credits=2.0)
+            is_proj_course = (
+                (subj == "CS" and 4000 <= cat_num < 5000 and cat_num % 10 == 1)
+                or code in CS_PROJECT_EXPLICIT
+                or any(c in CS_PROJECT_EXPLICIT for c in cross)
+            )
             if (
-                eligible_3cr_letter
-                and not non_academic
-                and (
-                    (subj == "CS" and 4000 <= cat_num < 5000 and cat_num % 10 == 1)
-                    or code in CS_PROJECT_EXPLICIT
-                    or any(c in CS_PROJECT_EXPLICIT for c in cross)
-                )
+                is_proj_course
+                and eligible_2cr_letter
+                and not _is_non_academic_only(row, allow_prj=True)
             ):
                 elig.cs_project = True
 

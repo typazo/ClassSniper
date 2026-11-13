@@ -333,6 +333,7 @@ export default function App() {
           <CsChecklistPage
             user={user}
             initialRoster={checklistRoster}
+            lastCatalogRefresh={lastCatalogRefresh}
             onUserUpdated={(updatedUser) => {
               setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
             }}

@@ -3,6 +3,7 @@ import { ArrowLeft, Calendar, Crosshair, Download, Loader2 } from "lucide-react"
 import { api } from "../api/client";
 import type { HydratedSchedule } from "../types";
 import { downloadScheduleICS } from "../utils/icsExport";
+import { summarizeScheduleInsights } from "../utils/scheduleInsights";
 import {
   computeScheduleDiagnostics,
   getCourseColor,
@@ -47,6 +48,11 @@ export function SharedScheduleView({ token, onExit }: Props) {
 
   const diagnostics = useMemo(
     () => computeScheduleDiagnostics(data?.courses || [], data?.blocks || []),
+    [data]
+  );
+
+  const insightsSummary = useMemo(
+    () => summarizeScheduleInsights(data?.courses || []),
     [data]
   );
 
@@ -112,6 +118,16 @@ export function SharedScheduleView({ token, onExit }: Props) {
                     {diagnostics.totalCredits} Credits
                   </span>{" "}
                   &middot; {data.courses.filter((c) => c.enabled).length} courses
+                  {insightsSummary.semesterTier && insightsSummary.semesterLoadScore != null && (
+                    <>
+                      {" "}
+                      &middot;{" "}
+                      <span className={insightsSummary.semesterTier.textClass}>
+                        Semester Difficulty: {insightsSummary.semesterTier.label} (
+                        {insightsSummary.semesterLoadScore.toFixed(1)}/5)
+                      </span>
+                    </>
+                  )}
                 </p>
               </div>
 

@@ -64,6 +64,18 @@ CREATE TABLE IF NOT EXISTS courses_meta (
     title_long TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     crse_id INTEGER,
+    acad_career TEXT NOT NULL DEFAULT '',
+    acad_group TEXT NOT NULL DEFAULT '',
+    catalog_prereq TEXT NOT NULL DEFAULT '',
+    catalog_coreq TEXT NOT NULL DEFAULT '',
+    catalog_forbidden_overlaps TEXT NOT NULL DEFAULT '',
+    crse_attrs_json TEXT NOT NULL DEFAULT '[]',
+    catalog_num INTEGER NOT NULL DEFAULT 0,
+    units_min REAL NOT NULL DEFAULT 0.0,
+    units_max REAL NOT NULL DEFAULT 0.0,
+    has_letter_grade INTEGER NOT NULL DEFAULT 1,
+    crosslists_json TEXT NOT NULL DEFAULT '[]',
+    components_json TEXT NOT NULL DEFAULT '[]',
     enroll_groups_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (roster, subject, catalog_nbr)
@@ -176,6 +188,22 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS course_insights_cache (
+    subject TEXT NOT NULL,
+    catalog_nbr TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    found INTEGER NOT NULL DEFAULT 1,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (subject, catalog_nbr)
+);
+
+CREATE TABLE IF NOT EXISTS rmp_instructor_cache (
+    name_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    found INTEGER NOT NULL DEFAULT 1,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -186,6 +214,22 @@ def build_fts_query(raw_query: str) -> str:
     if not tokens:
         return ""
     return " AND ".join(f'"{tok}"*' for tok in tokens)
+
+
+_COURSES_META_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("acad_career", "TEXT NOT NULL DEFAULT ''"),
+    ("acad_group", "TEXT NOT NULL DEFAULT ''"),
+    ("catalog_prereq", "TEXT NOT NULL DEFAULT ''"),
+    ("catalog_coreq", "TEXT NOT NULL DEFAULT ''"),
+    ("catalog_forbidden_overlaps", "TEXT NOT NULL DEFAULT ''"),
+    ("crse_attrs_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("catalog_num", "INTEGER NOT NULL DEFAULT 0"),
+    ("units_min", "REAL NOT NULL DEFAULT 0.0"),
+    ("units_max", "REAL NOT NULL DEFAULT 0.0"),
+    ("has_letter_grade", "INTEGER NOT NULL DEFAULT 1"),
+    ("crosslists_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("components_json", "TEXT NOT NULL DEFAULT '[]'"),
+)
 
 
 class Database:
@@ -201,7 +245,23 @@ class Database:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
+        await self._migrate_courses_meta()
         await self._conn.commit()
+
+    async def _migrate_courses_meta(self) -> None:
+        """Add CS-elective metadata columns idempotently on existing SQLite databases."""
+        cursor = await self.conn.execute("PRAGMA table_info(courses_meta)")
+        existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
+        had_metadata = "acad_group" in existing_cols
+        for col_name, col_def in _COURSES_META_MIGRATIONS:
+            if col_name not in existing_cols:
+                await self.conn.execute(f"ALTER TABLE courses_meta ADD COLUMN {col_name} {col_def}")
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_courses_meta_roster_level ON courses_meta (roster, subject, catalog_num)"
+        )
+        if not had_metadata:
+            # Force cached subjects from older DB schema to re-sync prereq and college metadata cleanly
+            await self.conn.execute("UPDATE subjects SET synced_at = NULL WHERE synced_at IS NOT NULL")
 
     async def close(self) -> None:
         if self._conn is not None:

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from app.config import Settings
 from app.db import Database
@@ -20,6 +21,7 @@ from app.providers.base import (
 )
 from app.services.catalog import CatalogSyncService
 from app.services.dispatcher import AlertDispatcher, MatchedAlert
+from app.services.gate import PRIORITY_POLLER, CornellRequestGate
 from app.services.sse import SSEHub
 
 
@@ -81,6 +83,7 @@ class PollerEngine:
         catalog: CatalogSyncService,
         dispatcher: AlertDispatcher,
         sse_hub: SSEHub,
+        gate: Optional[CornellRequestGate] = None,
     ) -> None:
         self.db = db
         self.settings = settings
@@ -88,6 +91,9 @@ class PollerEngine:
         self.catalog = catalog
         self.dispatcher = dispatcher
         self.sse_hub = sse_hub
+        self.gate = gate
+        if self.gate is not None:
+            self.gate.set_active_poller_fn(self.has_active_buckets)
 
         # In-memory cache: (roster, class_nbr) -> open_status
         self.section_status: dict[tuple[str, int], str] = {}
@@ -102,6 +108,7 @@ class PollerEngine:
         self._backoff_sec: float = 0.0
         self._backoff_until_mono: float = 0.0
         self._recent_rtts: deque[int] = deque(maxlen=50)
+        self._meta_synced_mono: dict[tuple[str, str], float] = {}
 
         self.telemetry: dict[str, Any] = {
             "state": "stopped",
@@ -114,6 +121,21 @@ class PollerEngine:
             "last_poll_rtt_ms": 0,
             "last_error": None,
         }
+
+    def has_active_buckets(self) -> bool:
+        return bool(self._buckets)
+
+    def get_bucket_last_polled_at(self, roster: str, subject: str) -> Optional[str]:
+        bucket = self._buckets.get((roster.upper(), subject.upper()))
+        return bucket.last_polled_at if bucket is not None else None
+
+    @asynccontextmanager
+    async def _gate_slot(self) -> AsyncIterator[None]:
+        if self.gate is None:
+            yield
+        else:
+            async with self.gate.slot(PRIORITY_POLLER, min_interval_sec=0.0, honor_backoff=False):
+                yield
 
     async def hydrate_from_db(self) -> None:
         """Seed in-memory state map from cached SQLite sections so restarts catch missed flips."""
@@ -249,7 +271,8 @@ class PollerEngine:
         async with self._poll_lock:
             self._last_request_mono = time.monotonic()
             try:
-                fetch_res = await self.provider.fetch_subject_classes(roster_u, subject_u)
+                async with self._gate_slot():
+                    fetch_res = await self.provider.fetch_subject_classes(roster_u, subject_u)
             except RateLimitedError as exc:
                 self.telemetry["rate_limit_hits"] += 1
                 self.telemetry["error_count"] += 1
@@ -257,6 +280,8 @@ class PollerEngine:
                 self.telemetry["state"] = "backoff"
                 self._backoff_sec = max(exc.retry_after_sec, min(60.0, (self._backoff_sec or 5.0) * 2.0))
                 self._backoff_until_mono = time.monotonic() + self._backoff_sec
+                if self.gate is not None:
+                    self.gate.record_rate_limit(self._backoff_sec)
                 return {"ok": False, "error": str(exc)}
             except UpstreamUnavailableError as exc:
                 self.telemetry["error_count"] += 1
@@ -269,6 +294,8 @@ class PollerEngine:
             # Successful poll resets backoff
             self._backoff_sec = 0.0
             self._backoff_until_mono = 0.0
+            if self.gate is not None:
+                self.gate.clear_backoff()
             now_iso = datetime.now(timezone.utc).isoformat()
 
             self.telemetry["total_polls"] += 1
@@ -294,6 +321,14 @@ class PollerEngine:
             if alerts:
                 self.telemetry["alerts_triggered"] += len(alerts)
                 await self.dispatcher.dispatch_alerts(alerts)
+
+            # Reuse polled payload after alert dispatch to refresh stale/migrated course metadata at zero HTTP cost
+            now_mono = time.monotonic()
+            last_meta = self._meta_synced_mono.get((roster_u, subject_u), 0.0)
+            if now_mono - last_meta >= 3600.0:
+                self._meta_synced_mono[(roster_u, subject_u)] = now_mono
+                if await self.catalog.is_subject_stale(roster_u, subject_u):
+                    await self.catalog.upsert_courses_batch(roster_u, subject_u, fetch_res.courses)
 
             # Publish lightweight telemetry tick for live UI
             self.sse_hub.publish("telemetry", self.get_metrics_snapshot())

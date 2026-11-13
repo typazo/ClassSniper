@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
@@ -17,6 +18,87 @@ from app.providers.base import (
     SubjectRecord,
     UpstreamUnavailableError,
 )
+
+LETTER_GRADE_BASES: frozenset[str] = frozenset({"GRD", "GRI", "OPT", "OPI"})
+_CATALOG_DIGITS_RE = re.compile(r"(\d+)")
+
+
+def parse_catalog_num(catalog_nbr: str) -> int:
+    """Extract leading integer catalog number (e.g. '4820' -> 4820, '2110A' -> 2110)."""
+    match = _CATALOG_DIGITS_RE.search(catalog_nbr or "")
+    return int(match.group(1)) if match else 0
+
+
+def _to_float(val: Any) -> Optional[float]:
+    if val is None or val == "":
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_course_derived_fields(
+    catalog_nbr: str,
+    enroll_groups: list[dict[str, Any]],
+    sections: list[Any],
+) -> dict[str, Any]:
+    """Compute numeric level, credit bounds, letter-grade availability, crosslists, and components."""
+    catalog_num = parse_catalog_num(catalog_nbr)
+    mins: list[float] = []
+    maxs: list[float] = []
+    grading_bases: list[str] = []
+    crosslists: list[str] = []
+    seen_cross: set[str] = set()
+    components: set[str] = set()
+
+    for eg in enroll_groups or []:
+        u_min = _to_float(eg.get("unitsMinimum"))
+        u_max = _to_float(eg.get("unitsMaximum"))
+        if u_min is not None:
+            mins.append(u_min)
+        if u_max is not None:
+            maxs.append(u_max)
+        elif u_min is not None:
+            maxs.append(u_min)
+
+        gb = str(eg.get("gradingBasis") or "").strip().upper()
+        if gb:
+            grading_bases.append(gb)
+
+        for comb in eg.get("simpleCombinations") or []:
+            c_subj = str(comb.get("subject") or "").strip().upper()
+            c_nbr = str(comb.get("catalogNbr") or "").strip()
+            if c_subj and c_nbr:
+                code = f"{c_subj} {c_nbr}"
+                if code not in seen_cross:
+                    seen_cross.add(code)
+                    crosslists.append(code)
+
+        for raw_sec in eg.get("classSections") or []:
+            comp = str(raw_sec.get("ssrComponent") or "").strip().upper()
+            if comp:
+                components.add(comp)
+
+    for sec in sections or []:
+        comp = getattr(sec, "ssr_component", None)
+        if comp is None and isinstance(sec, dict):
+            comp = sec.get("ssr_component") or sec.get("ssrComponent")
+        if comp:
+            components.add(str(comp).strip().upper())
+
+    units_min = min(mins) if mins else 0.0
+    units_max = max(maxs) if maxs else 0.0
+    has_letter_grade = True if not grading_bases else any(gb in LETTER_GRADE_BASES for gb in grading_bases)
+
+    return {
+        "catalog_num": catalog_num,
+        "units_min": units_min,
+        "units_max": units_max,
+        "has_letter_grade": has_letter_grade,
+        "crosslists": crosslists,
+        "components": sorted(components),
+    }
 
 
 def _format_meetings(meetings: list[dict[str, Any]]) -> tuple[str, str]:
@@ -67,6 +149,13 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
         description = str(cls.get("description") or "").strip()
         crse_id_raw = cls.get("crseId")
         crse_id = int(crse_id_raw) if crse_id_raw is not None else None
+        acad_career = str(cls.get("acadCareer") or "").strip().upper()
+        acad_group = str(cls.get("acadGroup") or "").strip().upper()
+        catalog_prereq = str(cls.get("catalogPrereq") or cls.get("catalogPrereqCoreq") or "").strip()
+        catalog_coreq = str(cls.get("catalogCoreq") or "").strip()
+        catalog_forbidden = str(cls.get("catalogForbiddenOverlaps") or "").strip()
+        raw_attrs = cls.get("crseAttrValueGroups") or []
+        crse_attrs = raw_attrs if isinstance(raw_attrs, list) else []
 
         raw_egs = cls.get("enrollGroups") or []
         sections: list[SectionRecord] = []
@@ -94,6 +183,7 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
                     )
                 )
 
+        derived = compute_course_derived_fields(catalog_nbr, raw_egs, sections)
         courses.append(
             CourseRecord(
                 roster=roster.upper(),
@@ -105,6 +195,18 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
                 crse_id=crse_id,
                 enroll_groups=raw_egs,
                 sections=sections,
+                acad_career=acad_career,
+                acad_group=acad_group,
+                catalog_prereq=catalog_prereq,
+                catalog_coreq=catalog_coreq,
+                catalog_forbidden_overlaps=catalog_forbidden,
+                crse_attrs=crse_attrs,
+                catalog_num=derived["catalog_num"],
+                units_min=derived["units_min"],
+                units_max=derived["units_max"],
+                has_letter_grade=derived["has_letter_grade"],
+                crosslists=derived["crosslists"],
+                components=derived["components"],
             )
         )
 

@@ -63,6 +63,18 @@ class CourseRecord:
     crse_id: int | None
     enroll_groups: list[dict[str, Any]]
     sections: list[SectionRecord]
+    acad_career: str = ""
+    acad_group: str = ""
+    catalog_prereq: str = ""
+    catalog_coreq: str = ""
+    catalog_forbidden_overlaps: str = ""
+    crse_attrs: list[dict[str, Any]] = field(default_factory=list)
+    catalog_num: int = 0
+    units_min: float = 0.0
+    units_max: float = 0.0
+    has_letter_grade: bool = True
+    crosslists: list[str] = field(default_factory=list)
+    components: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

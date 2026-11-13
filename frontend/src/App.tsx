@@ -17,7 +17,14 @@ import { CourseSearch } from "./components/CourseSearch";
 import { NotificationSetup } from "./components/NotificationSetup";
 import { TelemetryPanel } from "./components/TelemetryPanel";
 import { WatchList } from "./components/WatchList";
-import type { AuthStatus, MetricsResponse, PollerMetrics, SeatAlertSSE, Watch } from "./types";
+import type {
+  AuthStatus,
+  CatalogSubjectRefreshedSSE,
+  MetricsResponse,
+  PollerMetrics,
+  SeatAlertSSE,
+  Watch,
+} from "./types";
 import { playAlertChime } from "./utils/pwa";
 
 type Tab = "watches" | "search" | "alerts" | "telemetry" | "admin";
@@ -31,6 +38,7 @@ export default function App() {
   const [sseConnected, setSseConnected] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [bannerAlert, setBannerAlert] = useState<SeatAlertSSE | null>(null);
+  const [lastCatalogRefresh, setLastCatalogRefresh] = useState<CatalogSubjectRefreshedSSE | null>(null);
 
   const urlParams = new URLSearchParams(window.location.search);
   const initialInvite = urlParams.get("invite") || "";
@@ -89,6 +97,14 @@ export default function App() {
         if (soundEnabled) playAlertChime();
         refreshWatches();
         refreshMetrics();
+      } catch {
+        // ignore
+      }
+    });
+
+    es.addEventListener("catalog_subject_refreshed", (ev) => {
+      try {
+        setLastCatalogRefresh(JSON.parse((ev as MessageEvent).data));
       } catch {
         // ignore
       }
@@ -248,6 +264,7 @@ export default function App() {
         {tab === "search" && (
           <CourseSearch
             user={user}
+            lastCatalogRefresh={lastCatalogRefresh}
             onWatchCreated={() => {
               refreshWatches();
               setTab("watches");

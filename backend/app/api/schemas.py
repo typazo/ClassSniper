@@ -124,3 +124,8 @@ class UpdateAdminSettingsRequest(BaseModel):
 class SyncCatalogRequest(BaseModel):
     roster: Optional[str] = None
     subject: Optional[str] = None
+
+
+class RefreshSubjectsRequest(BaseModel):
+    roster: str = Field(min_length=3, max_length=10)
+    subjects: list[str] = Field(min_length=1, max_length=20)

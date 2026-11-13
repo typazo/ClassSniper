@@ -44,6 +44,36 @@ export interface CourseSection {
   updated_at?: string | null;
 }
 
+export interface ExternalCourseLinks {
+  roster: string;
+  cu_reviews: string;
+  coursicle: string;
+  rmp_search: string;
+}
+
+export type CSRequirementMode = "" | "cs_elective" | "tech_elective" | "external_spec";
+export type CSCurriculumMode = "current" | "pre2024";
+
+export interface CourseCSBadge {
+  kind: string;
+  tone: "emerald" | "sky" | "indigo" | "amber" | string;
+  label: string;
+}
+
+export interface CourseCSEligibility {
+  cs_elective: boolean;
+  cs_elective_pre2024: boolean;
+  cs_elective_warning: string;
+  tech_elective: boolean;
+  tech_elective_is_2000: boolean;
+  tech_elective_is_research: boolean;
+  tech_elective_reason: string;
+  tech_elective_warning: string;
+  external_spec: boolean;
+  external_spec_warning: string;
+  badges: CourseCSBadge[];
+}
+
 export interface CourseSummary {
   roster: string;
   subject: string;
@@ -53,6 +83,119 @@ export interface CourseSummary {
   description: string;
   updated_at: string;
   sections: CourseSection[];
+  external_links?: ExternalCourseLinks;
+  acad_career?: string;
+  acad_group?: string;
+  catalog_prereq?: string;
+  catalog_coreq?: string;
+  catalog_forbidden_overlaps?: string;
+  catalog_num?: number;
+  units_min?: number;
+  units_max?: number;
+  has_letter_grade?: boolean;
+  crosslists?: string[];
+  components?: string[];
+  cs_eligibility?: CourseCSEligibility;
+  subject_synced_at?: string | null;
+  status_is_stale?: boolean;
+}
+
+export interface SearchCoursesMeta {
+  total_matched: number;
+  returned: number;
+  queued_subjects: string[];
+  synced_subjects: number;
+  total_subjects: number;
+  stem_synced: number;
+  stem_total: number;
+  refreshing_subjects: string[];
+  warmup_active: boolean;
+}
+
+export interface CatalogStatus {
+  roster: string;
+  synced_subjects: number;
+  total_subjects: number;
+  stem_synced: number;
+  stem_total: number;
+  warmup_active: boolean;
+  refreshing_subjects: string[];
+}
+
+export interface CatalogSubjectRefreshedSSE {
+  roster: string;
+  subject: string;
+  synced_at: string;
+  courses_count: number;
+  section_statuses: Record<string, string>;
+  coverage?: {
+    synced_subjects: number;
+    total_subjects: number;
+    stem_synced: number;
+    stem_total: number;
+  };
+}
+
+export interface CuReviewTag {
+  category: string;
+  label: string;
+  sentiment: string;
+}
+
+export interface CuReviewItem {
+  id: string;
+  text: string;
+  rating: number | null;
+  difficulty: number | null;
+  workload: number | null;
+  grade: string;
+  professors: string[];
+  likes: number;
+  date: string;
+}
+
+export interface CuReviewsData {
+  found: boolean;
+  status: string;
+  error?: string;
+  cached?: boolean;
+  course_url: string;
+  rating: number | null;
+  difficulty: number | null;
+  workload: number | null;
+  summary: string;
+  summary_tags: CuReviewTag[];
+  semesters_offered: string[];
+  review_count: number;
+  reviews: CuReviewItem[];
+}
+
+export interface RmpInstructorItem {
+  name: string;
+  matched_name?: string;
+  found: boolean;
+  status: string;
+  cached?: boolean;
+  legacy_id: number | null;
+  rmp_url: string;
+  search_url: string;
+  department: string;
+  avg_rating: number | null;
+  avg_difficulty: number | null;
+  would_take_again_percent: number | null;
+  num_ratings: number;
+}
+
+export interface CourseInsights {
+  roster: string;
+  subject: string;
+  catalog_nbr: string;
+  links: ExternalCourseLinks;
+  cu_reviews: CuReviewsData;
+  rmp: {
+    instructors: RmpInstructorItem[];
+    search_url: string;
+  };
 }
 
 export interface WatchSectionInfo {

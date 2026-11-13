@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.api.schemas import SyncCatalogRequest
+from app.api.schemas import RefreshSubjectsRequest, SyncCatalogRequest
 from app.auth import get_current_user, get_db
 from app.db import Database
 from app.services.catalog import CatalogSyncService
+from app.services.insights import CourseInsightsService, build_external_links
 
 router = APIRouter(prefix="/api", tags=["courses"])
 
 
 def get_catalog(request: Request) -> CatalogSyncService:
     return request.app.state.catalog
+
+
+def get_insights(request: Request) -> CourseInsightsService:
+    return request.app.state.insights
 
 
 @router.get("/rosters")
@@ -80,12 +85,79 @@ async def search_courses(
     roster: str = Query(..., min_length=3, max_length=10),
     q: str = Query(default="", max_length=100),
     subject: str = Query(default="", max_length=12),
-    limit: int = Query(default=40, ge=1, le=100),
+    subjects: str = Query(default="", max_length=300),
+    level_min: Optional[int] = Query(default=None, ge=1000, le=9000),
+    min_credits: Optional[float] = Query(default=None, ge=0.0, le=20.0),
+    cs_requirement: Literal["", "cs_elective", "tech_elective", "external_spec"] = Query(default=""),
+    include_2000_te: bool = Query(default=True),
+    include_research_te: bool = Query(default=True),
+    curriculum: Literal["current", "pre2024"] = Query(default="current"),
+    refresh_stale: bool = Query(default=True),
+    limit: int = Query(default=100, ge=1, le=300),
     _: dict[str, Any] = Depends(get_current_user),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
-    courses = await catalog.search_courses(roster=roster, query=q, subject=subject, limit=limit)
-    return {"roster": roster.upper(), "courses": courses}
+    parsed_subjects = [s.strip().upper() for s in subjects.split(",") if s.strip()]
+    if subject.strip():
+        single = subject.strip().upper()
+        if single not in parsed_subjects:
+            parsed_subjects.insert(0, single)
+
+    result = await catalog.search_courses_advanced(
+        roster=roster,
+        query=q,
+        subjects=parsed_subjects,
+        level_min=level_min,
+        min_credits=min_credits,
+        cs_requirement=cs_requirement,
+        include_2000_te=include_2000_te,
+        include_research_te=include_research_te,
+        curriculum=curriculum,
+        refresh_stale=refresh_stale,
+        limit=limit,
+    )
+    return {
+        "roster": roster.upper(),
+        "courses": result["courses"],
+        "meta": result["meta"],
+    }
+
+
+@router.post("/courses/refresh-subjects")
+async def queue_refresh_subjects(
+    body: RefreshSubjectsRequest,
+    _: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    queued = catalog.queue_visible_refresh(body.roster, body.subjects)
+    return {"roster": body.roster.upper(), "queued": queued}
+
+
+@router.get("/catalog/status")
+async def get_catalog_status(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    _: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    return await catalog.get_catalog_status(target_roster)
+
+
+@router.get("/courses/{roster}/{subject}/{catalog_nbr}/insights")
+async def get_course_insights(
+    roster: str,
+    subject: str,
+    catalog_nbr: str,
+    refresh: bool = Query(default=False),
+    _: dict[str, Any] = Depends(get_current_user),
+    insights: CourseInsightsService = Depends(get_insights),
+) -> dict[str, Any]:
+    return await insights.get_course_insights(
+        roster=roster,
+        subject=subject,
+        catalog_nbr=catalog_nbr,
+        force_refresh=refresh,
+    )
 
 
 @router.get("/courses/{roster}/{subject}/{catalog_nbr}")
@@ -104,7 +176,10 @@ async def get_course_detail(
     course = await db.fetch_one(
         """
         SELECT roster, subject, catalog_nbr, title_short, title_long, description,
-               crse_id, enroll_groups_json, updated_at
+               crse_id, acad_career, acad_group, catalog_prereq, catalog_coreq,
+               catalog_forbidden_overlaps, catalog_num, units_min, units_max,
+               has_letter_grade, crosslists_json, components_json,
+               enroll_groups_json, updated_at
         FROM courses_meta
         WHERE roster = ? AND subject = ? AND catalog_nbr = ?
         """,
@@ -127,8 +202,12 @@ async def get_course_detail(
     for sec in sections:
         sec["components_required"] = json.loads(sec.pop("components_required_json", "[]"))
 
+    course["crosslists"] = json.loads(course.pop("crosslists_json", "[]"))
+    course["components"] = json.loads(course.pop("components_json", "[]"))
+    course["has_letter_grade"] = bool(course.get("has_letter_grade", 1))
     course["enroll_groups"] = orjson.loads(course.pop("enroll_groups_json"))
     course["sections"] = sections
+    course["external_links"] = build_external_links(roster_u, subject_u, catalog_nbr)
     return {"course": course}
 
 

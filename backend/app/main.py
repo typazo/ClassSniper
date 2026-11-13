@@ -21,6 +21,8 @@ from app.providers.base import AvailabilityProvider
 from app.providers.cornell import CornellRosterApiProvider
 from app.services.catalog import CatalogSyncService
 from app.services.dispatcher import AlertDispatcher
+from app.services.gate import CornellRequestGate
+from app.services.insights import CourseInsightsService
 from app.services.notifiers import DiscordWebhookNotifier, WebPushNotifier
 from app.services.poller import PollerEngine
 from app.services.sse import SSEHub
@@ -44,11 +46,13 @@ async def _bootstrap_env_admin(db: Database, settings: Settings) -> None:
     )
 
 
-async def _startup_catalog_sync(catalog: CatalogSyncService) -> None:
+async def _startup_catalog_sync(catalog: CatalogSyncService, start_warmup: bool = False) -> None:
     try:
         await catalog.sync_rosters_and_subjects()
     except Exception as exc:
         logger.warning("Initial Cornell roster/subject sync skipped or failed: %s", exc)
+    if start_warmup:
+        catalog.start_workers()
 
 
 async def _periodic_catalog_loop(catalog: CatalogSyncService, interval_hours: float) -> None:
@@ -64,6 +68,7 @@ async def _periodic_catalog_loop(catalog: CatalogSyncService, interval_hours: fl
 def create_app(
     custom_settings: Optional[Settings] = None,
     custom_provider: Optional[AvailabilityProvider] = None,
+    custom_insights: Optional[CourseInsightsService] = None,
 ) -> FastAPI:
     settings = custom_settings or get_settings()
     settings.ensure_persisted_secrets()
@@ -79,6 +84,7 @@ def create_app(
             timeout_sec=settings.cornell_api_timeout_sec,
         )
         sse_hub = SSEHub()
+        gate = CornellRequestGate()
         web_push = WebPushNotifier(
             vapid_private_key=settings.vapid_private_key,
             vapid_subject=settings.effective_vapid_subject,
@@ -88,7 +94,10 @@ def create_app(
             db=db,
             provider=provider,
             sync_interval_hours=settings.catalog_sync_interval_hours,
+            gate=gate,
+            sse_hub=sse_hub,
         )
+        insights = custom_insights or CourseInsightsService(db=db)
         dispatcher = AlertDispatcher(
             db=db,
             settings=settings,
@@ -103,20 +112,24 @@ def create_app(
             catalog=catalog,
             dispatcher=dispatcher,
             sse_hub=sse_hub,
+            gate=gate,
         )
+        catalog.set_poller(poller)
 
         app.state.settings = settings
         app.state.db = db
         app.state.provider = provider
         app.state.sse_hub = sse_hub
+        app.state.gate = gate
         app.state.catalog = catalog
+        app.state.insights = insights
         app.state.dispatcher = dispatcher
         app.state.poller = poller
 
         bg_tasks: list[asyncio.Task[None]] = []
         if settings.enable_background_workers:
             poller.start()
-            bg_tasks.append(asyncio.create_task(_startup_catalog_sync(catalog), name="startup-rosters"))
+            bg_tasks.append(asyncio.create_task(_startup_catalog_sync(catalog, start_warmup=True), name="startup-rosters"))
             bg_tasks.append(
                 asyncio.create_task(
                     _periodic_catalog_loop(catalog, settings.catalog_sync_interval_hours),
@@ -129,7 +142,9 @@ def create_app(
         finally:
             for t in bg_tasks:
                 t.cancel()
+            await catalog.stop_workers()
             await poller.stop()
+            await insights.close()
             await discord_notifier.close()
             await provider.close()
             await db.close()

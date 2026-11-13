@@ -2,11 +2,16 @@ import type {
   AdminSettings,
   AdminUserItem,
   AuthStatus,
+  CatalogStatus,
+  CourseInsights,
   CourseSummary,
+  CSCurriculumMode,
+  CSRequirementMode,
   InviteItem,
   MetricsResponse,
   NotifyPreferences,
   Roster,
+  SearchCoursesMeta,
   Subject,
   User,
   Watch,
@@ -73,11 +78,58 @@ export const api = {
   listRosters: () => request<{ rosters: Roster[] }>("/api/rosters"),
   listSubjects: (roster: string) =>
     request<{ roster: string; subjects: Subject[] }>(`/api/subjects?roster=${encodeURIComponent(roster)}`),
-  searchCourses: (roster: string, q: string, subject = "") => {
+  searchCourses: (
+    roster: string,
+    q: string,
+    options?: {
+      subject?: string;
+      subjects?: string[];
+      level_min?: number | null;
+      min_credits?: number | null;
+      cs_requirement?: CSRequirementMode;
+      include_2000_te?: boolean;
+      include_research_te?: boolean;
+      curriculum?: CSCurriculumMode;
+      refresh_stale?: boolean;
+      limit?: number;
+    }
+  ) => {
     const params = new URLSearchParams({ roster, q });
-    if (subject) params.set("subject", subject);
-    return request<{ roster: string; courses: CourseSummary[] }>(`/api/courses/search?${params.toString()}`);
+    if (options?.subject) params.set("subject", options.subject);
+    if (options?.subjects && options.subjects.length > 0) {
+      params.set("subjects", options.subjects.join(","));
+    }
+    if (options?.level_min) params.set("level_min", String(options.level_min));
+    if (options?.min_credits) params.set("min_credits", String(options.min_credits));
+    if (options?.cs_requirement) params.set("cs_requirement", options.cs_requirement);
+    if (options?.include_2000_te !== undefined) {
+      params.set("include_2000_te", String(options.include_2000_te));
+    }
+    if (options?.include_research_te !== undefined) {
+      params.set("include_research_te", String(options.include_research_te));
+    }
+    if (options?.curriculum) params.set("curriculum", options.curriculum);
+    if (options?.refresh_stale !== undefined) {
+      params.set("refresh_stale", String(options.refresh_stale));
+    }
+    if (options?.limit) params.set("limit", String(options.limit));
+    return request<{ roster: string; courses: CourseSummary[]; meta?: SearchCoursesMeta }>(
+      `/api/courses/search?${params.toString()}`
+    );
   },
+  getCatalogStatus: (roster: string) =>
+    request<CatalogStatus>(`/api/catalog/status?roster=${encodeURIComponent(roster)}`),
+  refreshSubjects: (roster: string, subjects: string[]) =>
+    request<{ roster: string; queued: string[] }>("/api/courses/refresh-subjects", {
+      method: "POST",
+      body: JSON.stringify({ roster, subjects }),
+    }),
+  getCourseInsights: (roster: string, subject: string, catalogNbr: string, refresh = false) =>
+    request<CourseInsights>(
+      `/api/courses/${encodeURIComponent(roster)}/${encodeURIComponent(subject)}/${encodeURIComponent(catalogNbr)}/insights${
+        refresh ? "?refresh=true" : ""
+      }`
+    ),
   syncCatalog: (roster?: string, subject?: string) =>
     request<{ status: string }>("/api/catalog/sync", {
       method: "POST",

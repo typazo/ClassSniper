@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 from dataclasses import dataclass
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Subscriber:
     user_id: int
     is_admin: bool

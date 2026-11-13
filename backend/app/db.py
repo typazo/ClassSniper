@@ -212,6 +212,53 @@ CREATE TABLE IF NOT EXISTS rmp_instructor_cache (
     found INTEGER NOT NULL DEFAULT 1,
     fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    roster TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 0,
+    share_enabled INTEGER NOT NULL DEFAULT 0,
+    share_token TEXT UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_user_roster
+    ON schedules (user_id, roster, is_active DESC, id ASC);
+
+CREATE TABLE IF NOT EXISTS schedule_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    subject TEXT NOT NULL,
+    catalog_nbr TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    selected_units REAL,
+    selected_class_nbrs_json TEXT NOT NULL DEFAULT '[]',
+    locked_class_nbrs_json TEXT NOT NULL DEFAULT '[]',
+    color_idx INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (schedule_id, subject, catalog_nbr)
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_courses_sched
+    ON schedule_courses (schedule_id, sort_order ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS schedule_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    label TEXT NOT NULL DEFAULT 'Busy',
+    days_json TEXT NOT NULL DEFAULT '[]',
+    start_min INTEGER NOT NULL,
+    end_min INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_blocks_sched
+    ON schedule_blocks (schedule_id, id ASC);
 """
 
 

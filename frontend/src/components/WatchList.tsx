@@ -32,6 +32,7 @@ const MODE_LABELS: Record<Watch["mode"], string> = {
 
 export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearch }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [checkMsg, setCheckMsg] = useState<Record<number, string>>({});
 
@@ -41,6 +42,14 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
     if (ok) {
       setCopiedId(watch.id);
       setTimeout(() => setCopiedId((cur) => (cur === watch.id ? null : cur)), 1800);
+    }
+  }
+
+  async function handleCopyCode(text: string, key: string) {
+    const ok = await copyText(text);
+    if (ok) {
+      setCopiedCodeKey(key);
+      setTimeout(() => setCopiedCodeKey((cur) => (cur === key ? null : cur)), 1800);
     }
   }
 
@@ -110,8 +119,63 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
     );
   }
 
+  const quickOpenCodes = watches.flatMap((w) =>
+    (w.open_sections || []).map((sec) => ({
+      watchId: w.id,
+      subject: w.subject,
+      catalogNbr: w.catalog_nbr,
+      sec,
+    }))
+  );
+
   return (
     <div className="space-y-3">
+      {quickOpenCodes.length > 0 && (
+        <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+              Open Codes Ready for Student Center ({quickOpenCodes.length})
+            </div>
+            <a
+              href="https://studentcenter.cornell.edu"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-400 px-2.5 py-1 text-xs font-bold text-zinc-950 hover:bg-emerald-300"
+            >
+              Open Student Center
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {quickOpenCodes.map(({ watchId, subject, catalogNbr, sec }) => {
+              const key = `top-${watchId}-${sec.class_nbr}`;
+              const isCopied = copiedCodeKey === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleCopyCode(String(sec.class_nbr), key)}
+                  title={`Click to copy ${sec.class_nbr} (${subject} ${catalogNbr} ${sec.ssr_component} ${sec.section})`}
+                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs transition ${
+                    isCopied
+                      ? "border-emerald-300 bg-emerald-400 text-zinc-950 font-bold"
+                      : sec.open_status === "W"
+                        ? "border-amber-400/50 bg-zinc-950/90 text-amber-200 hover:border-amber-300"
+                        : "border-emerald-500/50 bg-zinc-950/90 text-emerald-200 hover:border-emerald-400"
+                  }`}
+                >
+                  {isCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span className="font-mono text-sm font-bold tracking-wide">{sec.class_nbr}</span>
+                  <span className="text-[11px] opacity-85">
+                    {subject} {catalogNbr} {sec.ssr_component} {sec.section}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {watches.map((w) => {
         const isHighlighted = highlightClassNbr !== null && w.class_nbr === highlightClassNbr;
         const secInfo = w.section_info;
@@ -182,6 +246,71 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   </span>
                   {secInfo?.meetings_summary && <span>{secInfo.meetings_summary}</span>}
                 </div>
+
+                {w.open_sections && w.open_sections.length > 0 && (
+                  <div className="mt-2.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-300">
+                        Open Section Codes (click to copy)
+                      </span>
+                      {w.open_sections.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleCopyCode(
+                              w.open_sections!.map((s) => s.class_nbr).join(", "),
+                              `all-${w.id}`
+                            )
+                          }
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-zinc-950/80 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
+                        >
+                          {copiedCodeKey === `all-${w.id}` ? (
+                            <Check className="h-3 w-3" />
+                          ) : (
+                            <Copy className="h-3 w-3" />
+                          )}
+                          {copiedCodeKey === `all-${w.id}` ? "Copied all" : "Copy all"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {w.open_sections.map((sec) => {
+                        const key = `card-${w.id}-${sec.class_nbr}`;
+                        const isCopied = copiedCodeKey === key;
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => handleCopyCode(String(sec.class_nbr), key)}
+                            title={`${sec.ssr_component} ${sec.section} · ${sec.meetings_summary}`}
+                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition ${
+                              isCopied
+                                ? "border-emerald-300 bg-emerald-400 text-zinc-950 font-bold"
+                                : sec.open_status === "W"
+                                  ? "border-amber-500/40 bg-zinc-950/90 text-amber-200 hover:border-amber-400"
+                                  : "border-emerald-500/40 bg-zinc-950/90 text-emerald-200 hover:border-emerald-400"
+                            }`}
+                          >
+                            {isCopied ? (
+                              <Check className="h-3 w-3" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                            <span className="font-mono font-bold">{sec.class_nbr}</span>
+                            <span className="text-[11px] opacity-85">
+                              {sec.ssr_component} {sec.section}
+                            </span>
+                            {sec.meetings_summary && sec.meetings_summary !== "TBA" && (
+                              <span className="hidden text-[10px] text-zinc-400 sm:inline">
+                                · {sec.meetings_summary}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">

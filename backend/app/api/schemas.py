@@ -150,3 +150,63 @@ class CompletedPrereqsRequest(BaseModel):
 class UserPreferencesRequest(BaseModel):
     major_mode: Optional[Literal["none", "cs", "ilr"]] = None
     show_cs_features: Optional[bool] = None
+
+
+class CreateScheduleRequest(BaseModel):
+    roster: str = Field(min_length=3, max_length=10)
+    name: str = Field(min_length=1, max_length=80)
+    duplicate_from_id: Optional[int] = Field(default=None, ge=1)
+
+
+class UpdateScheduleRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    is_active: Optional[bool] = None
+    share_enabled: Optional[bool] = None
+    regenerate_share_token: Optional[bool] = None
+
+
+class AddScheduleCourseRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=12)
+    catalog_nbr: str = Field(min_length=1, max_length=12)
+    enabled: bool = True
+    selected_units: Optional[float] = Field(default=None, ge=0.0, le=20.0)
+    selected_class_nbrs: Optional[list[int]] = Field(default=None, max_length=20)
+    locked_class_nbrs: Optional[list[int]] = Field(default=None, max_length=20)
+    color_idx: Optional[int] = Field(default=None, ge=0, le=24)
+
+
+class QuickAddScheduleCourseRequest(AddScheduleCourseRequest):
+    roster: str = Field(min_length=3, max_length=10)
+
+
+class UpdateScheduleCourseRequest(BaseModel):
+    enabled: Optional[bool] = None
+    selected_units: Optional[float] = Field(default=None, ge=0.0, le=20.0)
+    selected_class_nbrs: Optional[list[int]] = Field(default=None, max_length=20)
+    locked_class_nbrs: Optional[list[int]] = Field(default=None, max_length=20)
+    color_idx: Optional[int] = Field(default=None, ge=0, le=24)
+
+
+class ApplyGeneratedItem(BaseModel):
+    item_id: int = Field(ge=1)
+    selected_class_nbrs: list[int] = Field(default_factory=list, max_length=20)
+
+
+class ApplyGeneratedScheduleRequest(BaseModel):
+    items: list[ApplyGeneratedItem] = Field(min_length=1, max_length=30)
+
+
+class CreateScheduleBlockRequest(BaseModel):
+    label: str = Field(default="Busy", min_length=1, max_length=60)
+    days: list[Literal["M", "T", "W", "R", "F", "Sa", "Su"]] = Field(min_length=1, max_length=7)
+    start_min: int = Field(ge=0, le=1439)
+    end_min: int = Field(ge=1, le=1440)
+    enabled: bool = True
+
+
+class UpdateScheduleBlockRequest(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    days: Optional[list[Literal["M", "T", "W", "R", "F", "Sa", "Su"]]] = Field(default=None, min_length=1, max_length=7)
+    start_min: Optional[int] = Field(default=None, ge=0, le=1439)
+    end_min: Optional[int] = Field(default=None, ge=1, le=1440)
+    enabled: Optional[bool] = None

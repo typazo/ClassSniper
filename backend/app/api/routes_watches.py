@@ -39,25 +39,77 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
         item["auto_pause"] = bool(item["auto_pause"])
         ith_only = bool(item.get("ithaca_or_virtual", 0))
         item["ithaca_or_virtual"] = ith_only
+        wanted_statuses = {"O", "W"} if w.get("trigger_on") == "open_or_waitlist" else {"O"}
+        open_sections: list[dict[str, Any]] = []
+
         if w["class_nbr"] is not None:
             sec = await db.fetch_one(
                 """
-                SELECT ssr_component, section, open_status, meetings_summary,
-                       instructors_summary, campus, location, location_descr,
-                       instruction_mode, updated_at
+                SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
+                       meetings_summary, instructors_summary, campus, location,
+                       location_descr, instruction_mode, updated_at
                 FROM roster_sections
                 WHERE roster = ? AND class_nbr = ?
                 """,
                 (w["roster"], w["class_nbr"]),
             )
             item["section_info"] = sec
+            if sec is not None:
+                if w.get("mode") == "linked_group":
+                    eg_idx = w.get("enroll_group_idx")
+                    if eg_idx is None:
+                        eg_idx = sec.get("enroll_group_idx")
+                    eg_rows = await db.fetch_all(
+                        """
+                        SELECT class_nbr, ssr_component, section, open_status,
+                               meetings_summary, instructors_summary
+                        FROM roster_sections
+                        WHERE roster = ? AND subject = ? AND catalog_nbr = ? AND enroll_group_idx = ?
+                        ORDER BY class_nbr ASC
+                        """,
+                        (w["roster"], w["subject"], w["catalog_nbr"], eg_idx),
+                    )
+                    for r in eg_rows:
+                        if str(r["open_status"]).upper() in wanted_statuses:
+                            open_sections.append(
+                                {
+                                    "class_nbr": int(r["class_nbr"]),
+                                    "ssr_component": r["ssr_component"],
+                                    "section": r["section"],
+                                    "open_status": r["open_status"],
+                                    "meetings_summary": r.get("meetings_summary") or "",
+                                    "instructors_summary": r.get("instructors_summary") or "",
+                                    "is_target": int(r["class_nbr"]) == int(w["class_nbr"]),
+                                }
+                            )
+                    open_sections.sort(
+                        key=lambda s: (
+                            0 if s["is_target"] else 1,
+                            0 if s["open_status"] == "O" else 1,
+                            s["class_nbr"],
+                        )
+                    )
+                elif str(sec["open_status"]).upper() in wanted_statuses:
+                    open_sections.append(
+                        {
+                            "class_nbr": int(w["class_nbr"]),
+                            "ssr_component": sec["ssr_component"],
+                            "section": sec["section"],
+                            "open_status": sec["open_status"],
+                            "meetings_summary": sec.get("meetings_summary") or "",
+                            "instructors_summary": sec.get("instructors_summary") or "",
+                            "is_target": True,
+                        }
+                    )
         else:
             sec_rows = await db.fetch_all(
                 """
                 SELECT class_nbr, ssr_component, section, open_status,
+                       meetings_summary, instructors_summary,
                        campus, location, location_descr, instruction_mode
                 FROM roster_sections
                 WHERE roster = ? AND subject = ? AND catalog_nbr = ?
+                ORDER BY class_nbr ASC
                 """,
                 (w["roster"], w["subject"], w["catalog_nbr"]),
             )
@@ -89,6 +141,27 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
                 "instruction_mode": "",
                 "updated_at": None,
             }
+            for s in filtered:
+                if str(s["open_status"]).upper() in wanted_statuses:
+                    open_sections.append(
+                        {
+                            "class_nbr": int(s["class_nbr"]),
+                            "ssr_component": s["ssr_component"],
+                            "section": s["section"],
+                            "open_status": s["open_status"],
+                            "meetings_summary": s.get("meetings_summary") or "",
+                            "instructors_summary": s.get("instructors_summary") or "",
+                            "is_target": False,
+                        }
+                    )
+            open_sections.sort(
+                key=lambda s: (
+                    0 if s["open_status"] == "O" else 1,
+                    s["ssr_component"],
+                    s["class_nbr"],
+                )
+            )
+        item["open_sections"] = open_sections
         enriched.append(item)
     return enriched
 

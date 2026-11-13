@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   BellPlus,
   BookMarked,
+  CalendarPlus,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -97,6 +99,7 @@ interface Props {
   lastCatalogRefresh?: CatalogSubjectRefreshedSSE | null;
   onUserUpdated?: (user: User) => void;
   onWatchCreated: () => void;
+  onJumpToScheduler?: () => void;
 }
 
 interface WatchDraft {
@@ -135,7 +138,7 @@ function resolveUserMajorMode(u: User): MajorMode {
   return u.show_cs_features === false ? "none" : "cs";
 }
 
-export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchCreated }: Props) {
+export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchCreated, onJumpToScheduler }: Props) {
   const [rosters, setRosters] = useState<Roster[]>([]);
   const [selectedRoster, setSelectedRoster] = useState("");
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -237,6 +240,34 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
     if (!selectedRoster || !showIlrFeatures) return;
     void loadIlrSummary(selectedRoster, ithacaOrVirtual, false);
   }, [selectedRoster, showIlrFeatures, ithacaOrVirtual, loadIlrSummary]);
+
+  const [scheduledStatus, setScheduledStatus] = useState<Record<string, "adding" | "added" | "exists">>({});
+
+  const handleQuickAddSchedule = useCallback(async (course: CourseSummary) => {
+    const key = courseCacheKey(course);
+    if (scheduledStatus[key] === "added" || scheduledStatus[key] === "exists") {
+      onJumpToScheduler?.();
+      return;
+    }
+    setScheduledStatus((p) => ({ ...p, [key]: "adding" }));
+    try {
+      const res = await api.quickAddScheduleCourse({
+        roster: course.roster,
+        subject: course.subject,
+        catalog_nbr: course.catalog_nbr,
+      });
+      setScheduledStatus((p) => ({
+        ...p,
+        [key]: res.already_present ? "exists" : "added",
+      }));
+    } catch {
+      setScheduledStatus((p) => {
+        const next = { ...p };
+        delete next[key];
+        return next;
+      });
+    }
+  }, [scheduledStatus, onJumpToScheduler]);
 
   const loadInsights = useCallback(
     async (course: CourseSummary, refresh = false) => {
@@ -1409,14 +1440,38 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                   </div>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => openCourseDraft(course)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-emerald-500/50 hover:text-emerald-300"
-                >
-                  <BellPlus className="h-3.5 w-3.5" />
-                  Watch Any Section
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={scheduledStatus[cacheKey] === "adding"}
+                    onClick={() => void handleQuickAddSchedule(course)}
+                    className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
+                      scheduledStatus[cacheKey] === "added" || scheduledStatus[cacheKey] === "exists"
+                        ? "border-sky-500/50 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25"
+                        : "border-zinc-700 text-zinc-200 hover:border-sky-500/50 hover:text-sky-300"
+                    }`}
+                  >
+                    {scheduledStatus[cacheKey] === "added" || scheduledStatus[cacheKey] === "exists" ? (
+                      <>
+                        <Check className="h-3.5 w-3.5" />
+                        {scheduledStatus[cacheKey] === "exists" ? "In Schedule" : "Added"}
+                      </>
+                    ) : (
+                      <>
+                        <CalendarPlus className="h-3.5 w-3.5" />
+                        {scheduledStatus[cacheKey] === "adding" ? "Adding..." : "+ Schedule"}
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openCourseDraft(course)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-emerald-500/50 hover:text-emerald-300"
+                  >
+                    <BellPlus className="h-3.5 w-3.5" />
+                    Watch Any Section
+                  </button>
+                </div>
               </div>
 
               {isOpen && (

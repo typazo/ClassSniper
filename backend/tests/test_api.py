@@ -117,3 +117,45 @@ async def test_search_watches_isolation_and_subject_limits(app_client) -> None:
     metrics = await admin.get("/api/metrics")
     assert metrics.status_code == 200
     assert "poller" in metrics.json()
+
+
+@pytest.mark.asyncio
+async def test_watch_open_sections_codes(app_client, fake_provider) -> None:
+    from tests.conftest import make_sample_courses
+
+    _, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    fake_provider.courses_by_bucket[("SP27", "CS")] = make_sample_courses(
+        lec_status="O",
+        dis202_status="O",
+        dis203_status="C",
+    )
+
+    # Create an any_section watch and a linked_group watch
+    w_any = await admin.post(
+        "/api/watches",
+        json={
+            "roster": "SP27",
+            "subject": "CS",
+            "catalog_nbr": "2110",
+            "component_filter": "DIS",
+            "mode": "any_section",
+        },
+    )
+    assert w_any.status_code == 201
+    assert [s["class_nbr"] for s in w_any.json()["watch"]["open_sections"]] == [6584]
+
+    w_linked = await admin.post(
+        "/api/watches",
+        json={
+            "roster": "SP27",
+            "subject": "CS",
+            "catalog_nbr": "2110",
+            "class_nbr": 6584,
+            "mode": "linked_group",
+        },
+    )
+    assert w_linked.status_code == 201
+    linked_codes = [s["class_nbr"] for s in w_linked.json()["watch"]["open_sections"]]
+    assert linked_codes == [6584, 6582]

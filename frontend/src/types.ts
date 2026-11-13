@@ -304,6 +304,16 @@ export interface WatchSectionInfo {
   updated_at: string | null;
 }
 
+export interface WatchOpenSection {
+  class_nbr: number;
+  ssr_component: string;
+  section: string;
+  open_status: string;
+  meetings_summary: string;
+  instructors_summary: string;
+  is_target?: boolean;
+}
+
 export interface Watch {
   id: number;
   user_id: number;
@@ -326,6 +336,7 @@ export interface Watch {
   last_notified_at: string | null;
   created_at: string;
   section_info: WatchSectionInfo | null;
+  open_sections?: WatchOpenSection[];
 }
 
 export interface PushSubscriptionItem {
@@ -450,4 +461,133 @@ export interface AdminSettings {
   discord_shared_webhook_url: string;
   poll_max_rps: number;
   max_subjects_per_invited_user: number;
+}
+
+export type DayCode = "M" | "T" | "W" | "R" | "F" | "Sa" | "Su";
+
+export interface SectionMeeting {
+  pattern: string;
+  days: DayCode[];
+  time_start: string;
+  time_end: string;
+  start_min: number;
+  end_min: number;
+  start_dt: string;
+  end_dt: string;
+  facility_descr: string;
+  building_descr: string;
+  instructors: string[];
+}
+
+export interface ScheduleSection {
+  class_nbr: number;
+  enroll_group_idx: number;
+  ssr_component: string;
+  section: string;
+  open_status: "O" | "C" | "W" | string;
+  components_required: string[];
+  meetings_summary: string;
+  instructors_summary: string;
+  instructors: string[];
+  campus: string;
+  location: string;
+  location_descr: string;
+  instruction_mode: string;
+  is_ithaca_or_virtual: boolean;
+  topic_description: string;
+  updated_at: string | null;
+  meetings: SectionMeeting[];
+}
+
+export interface ScheduleEnrollGroup {
+  enroll_group_idx: number;
+  components_required: string[];
+  units_min: number;
+  units_max: number;
+  grading_basis: string;
+  session_code: string;
+  crosslists: string[];
+  sections: ScheduleSection[];
+}
+
+export interface CachedCourseInsightsSummary {
+  rating: number | null;
+  difficulty: number | null;
+  workload: number | null;
+  review_count: number;
+}
+
+export interface CachedRmpSummary {
+  avg_rating: number | null;
+  avg_difficulty: number | null;
+  num_ratings: number;
+  rmp_url: string;
+}
+
+export interface ScheduleCourseItem {
+  id: number;
+  subject: string;
+  catalog_nbr: string;
+  enabled: boolean;
+  selected_units: number | null;
+  selected_class_nbrs: number[];
+  locked_class_nbrs: number[];
+  color_idx: number;
+  sort_order: number;
+  title_short: string;
+  title_long: string;
+  description: string;
+  acad_career: string;
+  acad_group: string;
+  catalog_prereq: string;
+  catalog_coreq: string;
+  catalog_forbidden_overlaps: string;
+  units_min: number;
+  units_max: number;
+  has_letter_grade: boolean;
+  crosslists: string[];
+  components: string[];
+  enroll_groups: ScheduleEnrollGroup[];
+  external_links: ExternalCourseLinks;
+  cs_eligibility: CourseCSEligibility | null;
+  ilr_eligibility: CourseIlrEligibility | null;
+  cached_insights: CachedCourseInsightsSummary | null;
+  cached_rmp: Record<string, CachedRmpSummary>;
+  subject_synced_at: string | null;
+  status_is_stale: boolean;
+}
+
+export interface ScheduleBlock {
+  id: number;
+  label: string;
+  days: DayCode[];
+  start_min: number;
+  end_min: number;
+  enabled: boolean;
+}
+
+export interface ScheduleSummary {
+  id: number;
+  roster: string;
+  name: string;
+  is_active: boolean;
+  share_enabled: boolean;
+  share_token: string | null;
+  share_url: string | null;
+  course_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HydratedSchedule {
+  schedule: ScheduleSummary;
+  courses: ScheduleCourseItem[];
+  blocks: ScheduleBlock[];
+  owner_username?: string;
+}
+
+export interface SchedulesListResponse {
+  roster: string;
+  schedules: ScheduleSummary[];
+  active: HydratedSchedule;
 }

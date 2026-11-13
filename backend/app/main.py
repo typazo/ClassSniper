@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import routes_admin, routes_auth, routes_courses, routes_notify, routes_watches
+from app.api import routes_admin, routes_auth, routes_courses, routes_notify, routes_scheduler, routes_watches
 from app.auth import hash_password_async
 from app.config import Settings, get_settings
 from app.db import Database
@@ -25,6 +25,7 @@ from app.services.gate import CornellRequestGate
 from app.services.insights import CourseInsightsService
 from app.services.notifiers import DiscordWebhookNotifier, WebPushNotifier
 from app.services.poller import PollerEngine
+from app.services.scheduler import SchedulerService
 from app.services.sse import SSEHub
 
 logger = logging.getLogger("classsniper")
@@ -115,6 +116,7 @@ def create_app(
             gate=gate,
         )
         catalog.set_poller(poller)
+        scheduler = SchedulerService(db=db, catalog=catalog, settings=settings)
 
         app.state.settings = settings
         app.state.db = db
@@ -125,6 +127,7 @@ def create_app(
         app.state.insights = insights
         app.state.dispatcher = dispatcher
         app.state.poller = poller
+        app.state.scheduler = scheduler
 
         bg_tasks: list[asyncio.Task[None]] = []
         if settings.enable_background_workers:
@@ -170,6 +173,7 @@ def create_app(
     app.include_router(routes_courses.router)
     app.include_router(routes_watches.router)
     app.include_router(routes_notify.router)
+    app.include_router(routes_scheduler.router)
     app.include_router(routes_admin.router)
 
     static_dir: Path = settings.static_dir

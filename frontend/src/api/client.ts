@@ -7,6 +7,8 @@ import type {
   CourseSummary,
   CSCurriculumMode,
   CSRequirementMode,
+  DayCode,
+  HydratedSchedule,
   IlrMatchMode,
   IlrSummaryResponse,
   InviteItem,
@@ -15,6 +17,7 @@ import type {
   NotifyPreferences,
   PrereqCourseOption,
   Roster,
+  SchedulesListResponse,
   SearchCoursesMeta,
   Subject,
   User,
@@ -287,4 +290,110 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+
+  listSchedules: (roster?: string) =>
+    request<SchedulesListResponse>(
+      `/api/schedules${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`
+    ),
+  createSchedule: (payload: { roster: string; name: string; duplicate_from_id?: number }) =>
+    request<SchedulesListResponse>("/api/schedules", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  quickAddScheduleCourse: (payload: {
+    roster: string;
+    subject: string;
+    catalog_nbr: string;
+    selected_class_nbrs?: number[];
+  }) =>
+    request<{ already_present: boolean; schedule_name: string; active: HydratedSchedule }>(
+      "/api/schedules/quick-add",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    ),
+  getSchedule: (scheduleId: number) => request<HydratedSchedule>(`/api/schedules/${scheduleId}`),
+  updateSchedule: (
+    scheduleId: number,
+    patch: {
+      name?: string;
+      is_active?: boolean;
+      share_enabled?: boolean;
+      regenerate_share_token?: boolean;
+    }
+  ) =>
+    request<SchedulesListResponse>(`/api/schedules/${scheduleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteSchedule: (scheduleId: number, roster?: string) =>
+    request<SchedulesListResponse>(
+      `/api/schedules/${scheduleId}${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`,
+      { method: "DELETE" }
+    ),
+  addScheduleCourse: (
+    scheduleId: number,
+    payload: {
+      subject: string;
+      catalog_nbr: string;
+      enabled?: boolean;
+      selected_units?: number | null;
+      selected_class_nbrs?: number[];
+    }
+  ) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/courses`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateScheduleCourse: (
+    scheduleId: number,
+    itemId: number,
+    patch: {
+      enabled?: boolean;
+      selected_units?: number | null;
+      selected_class_nbrs?: number[];
+      locked_class_nbrs?: number[];
+      color_idx?: number;
+    }
+  ) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/courses/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  applyGeneratedSchedule: (
+    scheduleId: number,
+    items: Array<{ item_id: number; selected_class_nbrs: number[] }>
+  ) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/apply-generated`, {
+      method: "PUT",
+      body: JSON.stringify({ items }),
+    }),
+  removeScheduleCourse: (scheduleId: number, itemId: number) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/courses/${itemId}`, {
+      method: "DELETE",
+    }),
+  createScheduleBlock: (
+    scheduleId: number,
+    payload: { label: string; days: DayCode[]; start_min: number; end_min: number; enabled?: boolean }
+  ) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/blocks`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateScheduleBlock: (
+    scheduleId: number,
+    blockId: number,
+    patch: { label?: string; days?: DayCode[]; start_min?: number; end_min?: number; enabled?: boolean }
+  ) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/blocks/${blockId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteScheduleBlock: (scheduleId: number, blockId: number) =>
+    request<HydratedSchedule>(`/api/schedules/${scheduleId}/blocks/${blockId}`, {
+      method: "DELETE",
+    }),
+  getSharedSchedule: (token: string) =>
+    request<HydratedSchedule>(`/api/schedules/shared/${encodeURIComponent(token)}`),
 };

@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   Bell,
+  Calendar,
+  Check,
+  Copy,
   Crosshair,
   LogOut,
   Search,
@@ -15,6 +18,8 @@ import { AdminPanel } from "./components/AdminPanel";
 import { AuthScreen } from "./components/AuthScreen";
 import { CourseSearch } from "./components/CourseSearch";
 import { NotificationSetup } from "./components/NotificationSetup";
+import { SchedulerPage } from "./components/SchedulerPage";
+import { SharedScheduleView } from "./components/SharedScheduleView";
 import { TelemetryPanel } from "./components/TelemetryPanel";
 import { WatchList } from "./components/WatchList";
 import type {
@@ -25,9 +30,9 @@ import type {
   SeatAlertSSE,
   Watch,
 } from "./types";
-import { playAlertChime } from "./utils/pwa";
+import { copyText, playAlertChime } from "./utils/pwa";
 
-type Tab = "watches" | "search" | "alerts" | "telemetry" | "admin";
+type Tab = "watches" | "search" | "scheduler" | "alerts" | "telemetry" | "admin";
 
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -38,12 +43,14 @@ export default function App() {
   const [sseConnected, setSseConnected] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [bannerAlert, setBannerAlert] = useState<SeatAlertSSE | null>(null);
+  const [bannerCopied, setBannerCopied] = useState(false);
   const [lastCatalogRefresh, setLastCatalogRefresh] = useState<CatalogSubjectRefreshedSSE | null>(null);
 
   const urlParams = new URLSearchParams(window.location.search);
   const initialInvite = urlParams.get("invite") || "";
   const highlightRaw = urlParams.get("highlight");
   const highlightClassNbr = highlightRaw ? Number(highlightRaw) : null;
+  const [shareToken, setShareToken] = useState<string>(() => urlParams.get("share") || "");
 
   const refreshAuth = useCallback(async () => {
     const status = await api.authStatus();
@@ -115,6 +122,20 @@ export default function App() {
       setSseConnected(false);
     };
   }, [auth?.user, refreshWatches, refreshMetrics, soundEnabled]);
+
+  if (shareToken) {
+    return (
+      <SharedScheduleView
+        token={shareToken}
+        onExit={() => {
+          setShareToken("");
+          const url = new URL(window.location.href);
+          url.searchParams.delete("share");
+          window.history.replaceState({}, "", url.toString());
+        }}
+      />
+    );
+  }
 
   if (!auth) {
     return (
@@ -201,6 +222,7 @@ export default function App() {
         <div className="mx-auto hidden max-w-5xl gap-1 px-4 pb-2 sm:flex">
           <NavBtn active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label={`Watchlist (${watches.length})`} />
           <NavBtn active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search Classes" />
+          <NavBtn active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Scheduler" />
           <NavBtn active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts & Push" />
           <NavBtn
             active={tab === "telemetry"}
@@ -229,7 +251,21 @@ export default function App() {
                 {bannerAlert.course_title} &middot; Detected in {bannerAlert.poll_rtt_ms}ms
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await copyText(String(bannerAlert.class_nbr));
+                  if (ok) {
+                    setBannerCopied(true);
+                    setTimeout(() => setBannerCopied(false), 1800);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/60 bg-zinc-950/90 px-3 py-1.5 font-mono text-xs font-bold text-emerald-200 hover:bg-zinc-900"
+              >
+                {bannerCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {bannerCopied ? `Copied ${bannerAlert.class_nbr}` : `Copy ${bannerAlert.class_nbr}`}
+              </button>
               <a
                 href={bannerAlert.student_center_url}
                 target="_blank"
@@ -252,7 +288,7 @@ export default function App() {
       )}
 
       {/* Main Content */}
-      <main className="mx-auto mt-5 max-w-5xl px-4">
+      <main className={`mx-auto mt-5 px-4 ${tab === "scheduler" ? "max-w-7xl" : "max-w-5xl"}`}>
         {tab === "watches" && (
           <WatchList
             watches={watches}
@@ -272,6 +308,15 @@ export default function App() {
               refreshWatches();
               setTab("watches");
             }}
+            onJumpToScheduler={() => setTab("scheduler")}
+          />
+        )}
+        {tab === "scheduler" && (
+          <SchedulerPage
+            user={user}
+            lastCatalogRefresh={lastCatalogRefresh}
+            onWatchesChanged={refreshWatches}
+            onJumpToSearch={() => setTab("search")}
           />
         )}
         {tab === "alerts" && <NotificationSetup />}
@@ -285,6 +330,7 @@ export default function App() {
       <nav className="fixed inset-x-0 bottom-0 z-30 flex border-t border-zinc-800 bg-zinc-950/95 pb-safe backdrop-blur-md sm:hidden">
         <MobileTab active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label="Watches" />
         <MobileTab active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search" />
+        <MobileTab active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Schedule" />
         <MobileTab active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts" />
         <MobileTab
           active={tab === "telemetry"}

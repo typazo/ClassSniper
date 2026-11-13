@@ -1474,30 +1474,29 @@ class CatalogSyncService:
                  AND cm.subject = courses_fts.subject
                  AND cm.catalog_nbr = courses_fts.catalog_nbr
                 WHERE courses_fts MATCH ?
-                  AND courses_fts.roster = ?
-                ORDER BY rank, cm.subject, cm.catalog_num, cm.catalog_nbr
+                ORDER BY CASE WHEN courses_fts.roster = ? THEN 0 ELSE 1 END, rank, cm.subject, cm.catalog_num, cm.catalog_nbr
                 LIMIT ?
                 """,
-                (fts_expr, roster_u, limit),
+                (fts_expr, roster_u, limit * 2),
             )
             _append_rows(fts_rows)
 
         tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", query_clean)]
         if tokens and len(rows) < limit:
-            clauses = ["roster = ?"]
-            params: list[Any] = [roster_u]
+            clauses: list[str] = []
+            params: list[Any] = []
             for tok in tokens[:5]:
                 clauses.append(
                     "LOWER(subject || ' ' || catalog_nbr || ' ' || COALESCE(title_long, title_short, '')) LIKE ? ESCAPE '\\'"
                 )
                 params.append(f"%{_escape_like(tok)}%")
-            params.append(limit)
+            params.extend([roster_u, limit * 2])
             like_rows = await self.db.fetch_all(
                 f"""
                 SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
                 FROM courses_meta
                 WHERE {' AND '.join(clauses)}
-                ORDER BY subject, catalog_num, catalog_nbr
+                ORDER BY CASE WHEN roster = ? THEN 0 ELSE 1 END, subject, catalog_num, catalog_nbr
                 LIMIT ?
                 """,
                 params,

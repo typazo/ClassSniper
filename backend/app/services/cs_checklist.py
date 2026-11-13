@@ -9,7 +9,9 @@ from app.db import Database
 from app.services.attributes import AS_DISTRIBUTION_CODES, extract_course_attributes, normalize_attr_code
 from app.services.cs_requirements import (
     CSRequirementsIndex,
+    CourseEligibility,
     normalize_course_code,
+    parse_catalog_num,
 )
 
 LIBERAL_STUDIES_ATTRS: tuple[str, ...] = (
@@ -381,7 +383,10 @@ async def build_cs_checklist_payload(
             meta_rows = await db.fetch_all(
                 f"""
                 SELECT roster, subject, catalog_nbr, title_short, title_long,
-                       units_min, units_max, crse_attrs_json
+                       acad_career, acad_group, catalog_prereq, catalog_coreq,
+                       catalog_num, units_min, units_max, has_letter_grade,
+                       crosslists_json, components_json, enroll_groups_json,
+                       crse_attrs_json
                 FROM courses_meta
                 WHERE {placeholders}
                 ORDER BY CASE WHEN roster = ? THEN 0 ELSE 1 END, updated_at DESC
@@ -395,6 +400,75 @@ async def build_cs_checklist_payload(
                         **mr,
                         "attrs": extract_course_attributes(mr),
                     }
+
+    # Fallback CSRequirementsIndex for taken/planned courses from other rosters (e.g. FA26 electives)
+    # or uncached historical courses so CS 4000+/5000+ & TEs still classify cleanly on any term.
+    fallback_indexes: dict[str, CSRequirementsIndex] = {}
+    fallback_rosters_needed: set[str] = set()
+    synthetic_rows: list[dict[str, Any]] = []
+    for code in all_codes:
+        parts = code.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        subj, nbr = parts
+        if cs_index.has_course(subj, nbr):
+            continue
+        mr = meta_by_code.get(code)
+        if mr and mr.get("roster"):
+            fallback_rosters_needed.add(str(mr["roster"]).upper())
+        else:
+            synthetic_rows.append(
+                {
+                    "subject": subj,
+                    "catalog_nbr": nbr,
+                    "title_short": code,
+                    "title_long": code,
+                    "acad_career": "GR" if parse_catalog_num(nbr) >= 5000 else "UG",
+                    "acad_group": "EN" if subj in {"CS", "ECE", "ENGRD", "ENGRI", "ORIE", "MAE"} else "AS",
+                    "catalog_prereq": "",
+                    "catalog_coreq": "",
+                    "catalog_num": parse_catalog_num(nbr),
+                    "units_min": 3.0,
+                    "units_max": 3.0,
+                    "has_letter_grade": 1,
+                    "crosslists_json": "[]",
+                    "components_json": '["LEC"]',
+                    "enroll_groups_json": "[]",
+                }
+            )
+
+    for fb_roster in sorted(fallback_rosters_needed):
+        fb_rows = await db.fetch_all(
+            """
+            SELECT subject, catalog_nbr, title_short, title_long,
+                   acad_career, acad_group, catalog_prereq, catalog_coreq,
+                   catalog_num, units_min, units_max, has_letter_grade,
+                   crosslists_json, components_json, enroll_groups_json
+            FROM courses_meta
+            WHERE roster = ?
+            """,
+            (fb_roster,),
+        )
+        if fb_rows:
+            fallback_indexes[fb_roster] = CSRequirementsIndex(fb_rows)
+
+    synthetic_index = CSRequirementsIndex(synthetic_rows) if synthetic_rows else None
+
+    def get_course_eligibility(code: str) -> CourseEligibility:
+        parts = code.split(" ", 1)
+        if len(parts) != 2:
+            return CourseEligibility()
+        subj, nbr = parts
+        if cs_index.has_course(subj, nbr):
+            return cs_index.get(subj, nbr)
+        mr = meta_by_code.get(code)
+        if mr and mr.get("roster"):
+            fb_idx = fallback_indexes.get(str(mr["roster"]).upper())
+            if fb_idx is not None and fb_idx.has_course(subj, nbr):
+                return fb_idx.get(subj, nbr)
+        if synthetic_index is not None and synthetic_index.has_course(subj, nbr):
+            return synthetic_index.get(subj, nbr)
+        return CourseEligibility()
 
     def enrich_code(code: str, fallback_source: str = "completed", fallback_sem: str = "") -> dict[str, Any]:
         norm = normalize_course_code(code) or code.upper().strip()
@@ -744,37 +818,23 @@ async def build_cs_checklist_payload(
 
     # CS Project first or CS Electives? Assign CS Project first if a practicum was taken cleanly, OR prioritize explicit CS Project slots!
     def _is_cs_project(it: dict[str, Any]) -> bool:
-        parts = it["course"].split(" ", 1)
-        if len(parts) != 2:
-            return False
-        elig = cs_index.get(parts[0], parts[1])
-        return elig.cs_project
+        return get_course_eligibility(it["course"]).cs_project
 
     def _is_cs_elective(it: dict[str, Any]) -> bool:
         code = it["course"]
         if code in _EXCLUDED_FIXED_CODES:
             return False
-        parts = code.split(" ", 1)
-        if len(parts) != 2:
-            return False
-        elig = cs_index.get(parts[0], parts[1])
+        elig = get_course_eligibility(code)
         return elig.cs_elective_pre2024 if curriculum == "pre2024" else elig.cs_elective
 
     def _is_tech_elective(it: dict[str, Any]) -> bool:
         code = it["course"]
         if code in _EXCLUDED_FIXED_CODES:
             return False
-        parts = code.split(" ", 1)
-        if len(parts) != 2:
-            return False
-        return cs_index.get(parts[0], parts[1]).tech_elective
+        return get_course_eligibility(code).tech_elective
 
     def _is_ext_spec(it: dict[str, Any]) -> bool:
-        code = it["course"]
-        parts = code.split(" ", 1)
-        if len(parts) != 2:
-            return False
-        return cs_index.get(parts[0], parts[1]).external_spec
+        return get_course_eligibility(it["course"]).external_spec
 
     # First reserve any explicitly pinned manual overrides in electives so auto-fill skips them
     for key in (

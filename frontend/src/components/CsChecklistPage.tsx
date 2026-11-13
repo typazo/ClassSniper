@@ -8,6 +8,7 @@ import {
   GraduationCap,
   ListChecks,
   Loader2,
+  Plus,
   RotateCcw,
   Search,
   Sparkles,
@@ -23,10 +24,26 @@ import type {
   CsChecklistSlot,
   CsChecklistSlotInput,
   CSRequirementMode,
+  PrereqCourseOption,
   Roster,
   User,
 } from "../types";
 import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
+
+const COURSE_CODE_RE = /([A-Za-z]{2,8})[\s\-:]*(\d{3,4}[A-Za-z]?)/g;
+
+function parseCourseInputTokens(raw: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const match of raw.matchAll(COURSE_CODE_RE)) {
+    const code = `${match[1].toUpperCase()} ${match[2].toUpperCase()}`;
+    if (!seen.has(code)) {
+      seen.add(code);
+      out.push(code);
+    }
+  }
+  return out;
+}
 
 interface Props {
   user: User;
@@ -100,6 +117,10 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [prereqsOpen, setPrereqsOpen] = useState(false);
+  const [takenInput, setTakenInput] = useState("");
+  const [takenOptions, setTakenOptions] = useState<PrereqCourseOption[]>([]);
+  const [takenFocused, setTakenFocused] = useState(false);
+  const [takenSaving, setTakenSaving] = useState(false);
 
   useEffect(() => {
     if (initialRoster && initialRoster !== selectedRoster) {
@@ -156,6 +177,70 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
       void loadChecklist(selectedRoster);
     }
   }, [selectedRoster, loadChecklist]);
+
+  useEffect(() => {
+    const q = takenInput.trim();
+    if (!q || !selectedRoster) {
+      setTakenOptions([]);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      api
+        .getPrereqOptions(selectedRoster, q, 10, "cs")
+        .then((res) => {
+          if (!cancelled) setTakenOptions(res.options);
+        })
+        .catch(() => {
+          if (!cancelled) setTakenOptions([]);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [takenInput, selectedRoster]);
+
+  const updateTakenList = async (nextCompleted: string[]) => {
+    setTakenSaving(true);
+    setError("");
+    try {
+      const normalized = Array.from(new Set(nextCompleted.map((c) => c.trim().toUpperCase()).filter(Boolean))).sort();
+      const res = await api.updateUserPrereqs(
+        {
+          completed_courses: normalized,
+          include_implied_prereqs: user.include_implied_prereqs ?? true,
+        },
+        selectedRoster || undefined
+      );
+      onUserUpdated?.({
+        ...user,
+        completed_courses: res.completed_courses,
+        include_implied_prereqs: res.include_implied_prereqs,
+      });
+      if (selectedRoster) {
+        await loadChecklist(selectedRoster);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update completed courses");
+    } finally {
+      setTakenSaving(false);
+    }
+  };
+
+  const addTakenCourses = async (codes: string[]) => {
+    const clean = codes.map((c) => c.trim().toUpperCase()).filter(Boolean);
+    if (clean.length === 0) return;
+    const current = checklist?.completed_courses || user.completed_courses || [];
+    await updateTakenList([...current, ...clean]);
+    setTakenInput("");
+    setTakenOptions([]);
+  };
+
+  const removeTakenCourse = async (code: string) => {
+    const current = checklist?.completed_courses || user.completed_courses || [];
+    await updateTakenList(current.filter((c) => c !== code));
+  };
 
   const persistChecklist = async (
     nextCollege: "arts" | "engineering",
@@ -490,6 +575,139 @@ export function CsChecklistPage({ user, initialRoster, onUserUpdated, onLaunchSe
       {error && (
         <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
           {error}
+        </div>
+      )}
+
+      {/* Inline Classes I've Taken Quick-Add Bar */}
+      {checklist && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/75 p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <ListChecks className="h-4 w-4 text-sky-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-200">
+                  Classes I&apos;ve Taken ({checklist.completed_courses.length})
+                </h3>
+                {takenSaving && (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                )}
+              </div>
+              <p className="mt-0.5 text-[11px] text-zinc-400">
+                Add past or current courses right here (e.g. <span className="font-mono text-zinc-300">CS 5470, CS 5306</span>) to auto-fill checklist slots &amp; satisfy prereqs.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPrereqsOpen(true)}
+              className="rounded-xl border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-sky-500/50 hover:text-sky-200"
+            >
+              Bundles &amp; Implied Prereqs...
+            </button>
+          </div>
+
+          <div className="relative flex flex-wrap gap-2">
+            <div className="relative min-w-[220px] flex-1">
+              <input
+                type="text"
+                value={takenInput}
+                onFocus={() => setTakenFocused(true)}
+                onBlur={() => setTimeout(() => setTakenFocused(false), 180)}
+                onChange={(e) => setTakenInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    const parsed = parseCourseInputTokens(takenInput);
+                    if (parsed.length > 0) {
+                      void addTakenCourses(parsed);
+                    } else if (takenOptions.length > 0) {
+                      void addTakenCourses([takenOptions[0].code]);
+                    }
+                  }
+                }}
+                placeholder="Type course code or title (e.g. CS 5470, CS 5306) and press Enter..."
+                className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-500 focus:border-sky-500 focus:outline-none"
+              />
+
+              {takenFocused && takenInput.trim() && takenOptions.length > 0 && (
+                <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-1 shadow-2xl">
+                  {takenOptions.map((opt) => {
+                    const alreadyAdded = checklist.completed_courses.includes(opt.code);
+                    return (
+                      <button
+                        key={opt.code}
+                        type="button"
+                        disabled={alreadyAdded}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          if (!alreadyAdded) {
+                            void addTakenCourses([opt.code]);
+                          }
+                        }}
+                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs ${
+                          alreadyAdded
+                            ? "cursor-default text-zinc-500"
+                            : "text-zinc-200 hover:bg-zinc-800"
+                        }`}
+                      >
+                        <span className="truncate">
+                          <span className="font-mono font-semibold text-white">{opt.code}</span>
+                          {opt.title ? <span className="ml-2 text-zinc-400">{opt.title}</span> : null}
+                        </span>
+                        {alreadyAdded ? (
+                          <span className="text-[10px] text-emerald-400">Added</span>
+                        ) : (
+                          <Plus className="h-3.5 w-3.5 shrink-0 text-sky-400" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={takenSaving || (!parseCourseInputTokens(takenInput).length && takenOptions.length === 0)}
+              onClick={() => {
+                const parsed = parseCourseInputTokens(takenInput);
+                if (parsed.length > 0) {
+                  void addTakenCourses(parsed);
+                } else if (takenOptions.length > 0) {
+                  void addTakenCourses([takenOptions[0].code]);
+                }
+              }}
+              className="inline-flex items-center gap-1 rounded-xl bg-sky-500 px-3.5 py-2 text-xs font-semibold text-zinc-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add Class
+            </button>
+          </div>
+
+          {checklist.completed_courses.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {checklist.completed_courses.map((code) => (
+                <span
+                  key={code}
+                  className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] font-medium text-emerald-200"
+                >
+                  {code}
+                  <button
+                    type="button"
+                    disabled={takenSaving}
+                    onClick={() => void removeTakenCourse(code)}
+                    title={`Remove ${code}`}
+                    className="rounded p-0.5 text-emerald-300/80 hover:bg-emerald-500/20 hover:text-white"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-zinc-500">
+              No classes recorded yet. Type above or open Bundles to add courses you have already taken.
+            </p>
+          )}
         </div>
       )}
 

@@ -969,6 +969,10 @@ class CSRequirementsIndex:
         self._prereq_ast_by_code: dict[str, tuple[str, Optional[PrereqNode]]] = {}
         self._build(courses)
 
+    def has_course(self, subject: str, catalog_nbr: str) -> bool:
+        code = f"{subject.upper()} {catalog_nbr.strip()}"
+        return code in self._by_code
+
     def get(self, subject: str, catalog_nbr: str) -> CourseEligibility:
         code = f"{subject.upper()} {catalog_nbr.strip()}"
         return self._by_code.get(code, CourseEligibility())

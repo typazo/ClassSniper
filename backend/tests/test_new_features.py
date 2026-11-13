@@ -226,6 +226,79 @@ async def test_cs_checklist_auto_fill_what_if_and_manual_persistence(app_client)
 
 
 @pytest.mark.asyncio
+async def test_cs_checklist_cross_roster_and_historical_electives(app_client) -> None:
+    app, admin = app_client
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    db = app.state.db
+    # Seed CS 5306 and CS 5470 ONLY in FA26 (not in SP27) plus FTS rows for autocomplete
+    await db.execute(
+        """
+        INSERT INTO subjects (roster, value, descr, synced_at)
+        VALUES ('FA26', 'CS', 'Computer Science', datetime('now'))
+        ON CONFLICT(roster, value) DO UPDATE SET synced_at = datetime('now')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO courses_meta (
+            roster, subject, catalog_nbr, catalog_num, title_short, title_long, description,
+            acad_career, acad_group, crse_id, enroll_groups_json, crosslists_json,
+            components_json, units_min, units_max, has_letter_grade, crse_attrs_json
+        ) VALUES
+        (
+            'FA26', 'CS', '5306', 5306, 'Crowdsourcing & Human Comp', 'Crowdsourcing and Human Computation',
+            'Human-in-the-loop computation.', 'GR', 'EN', 91001, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        ),
+        (
+            'FA26', 'CS', '5470', 5470, 'Systems for Large-Scale ML', 'Systems for Large-Scale ML',
+            'Distributed ML systems.', 'GR', 'EN', 91002, '[]', '[]', '["LEC"]',
+            3.0, 3.0, 1, '[]'
+        )
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO courses_fts (roster, subject, catalog_nbr, course_code, title_long, description, class_nbrs)
+        VALUES ('FA26', 'CS', '5306', 'CS 5306 CS5306', 'Crowdsourcing and Human Computation', 'Human-in-the-loop computation.', ''),
+               ('FA26', 'CS', '5470', 'CS 5470 CS5470', 'Systems for Large-Scale ML', 'Distributed ML systems.', '')
+        """
+    )
+
+    # Autocomplete options for SP27 still find FA26 courses
+    opt_res = await admin.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "5470"})
+    assert opt_res.status_code == 200
+    assert any(o["code"] == "CS 5470" for o in opt_res.json()["options"])
+
+    # Add CS 5306, CS 5470 (FA26 only), plus uncached CS 4700, CS 4780 & CS 5112
+    await admin.put(
+        "/api/user/prereqs",
+        json={
+            "completed_courses": ["CS 4700", "CS 4780", "CS 5112", "CS 5306", "CS 5470"],
+            "include_implied_prereqs": True,
+        },
+    )
+    cl = await admin.get("/api/cs/checklist", params={"roster": "SP27"})
+    assert cl.status_code == 200
+    slots = _flatten_checklist_slots(cl.json())
+
+    assert slots["core_aiml"]["course"] == "CS 4780"
+    # All 3 CS Electives + 1 Tech Elective filled cleanly across FA26 & uncached historical codes
+    filled_elective_courses = {
+        slots["cs_elec_1"]["course"],
+        slots["cs_elec_2"]["course"],
+        slots["cs_elec_3"]["course"],
+        slots["tech_elec_1"]["course"],
+    }
+    assert filled_elective_courses == {"CS 4700", "CS 5112", "CS 5306", "CS 5470"}
+    # Titles hydrated from FA26 courses_meta even when viewing SP27
+    by_course = {sl["course"]: sl for sl in slots.values() if sl["course"]}
+    assert by_course["CS 5470"]["title"] == "Systems for Large-Scale ML"
+    assert by_course["CS 5306"]["title"] == "Crowdsourcing and Human Computation"
+
+
+@pytest.mark.asyncio
 async def test_batch_load_schedule_insights(app_client) -> None:
     app, admin = app_client
     await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})

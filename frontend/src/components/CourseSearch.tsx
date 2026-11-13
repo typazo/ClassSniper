@@ -1122,6 +1122,14 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                           {course.catalog_forbidden_overlaps}
                         </div>
                       )}
+                      {showCsFeatures && elig?.tech_elective && elig.tech_elective_reason && (
+                        <div className="text-sky-300/95">
+                          <span className="font-medium">Why it counts as CS Tech Elective: </span>
+                          {elig.tech_elective_reason.replace(/^TE rule:\s*/i, "")}
+                          {elig.tech_elective_reason.includes("cross-listed") &&
+                            " (Cornell departments sometimes write different prerequisite text on cross-listed numbers.)"}
+                        </div>
+                      )}
                       {showCsFeatures && course.acad_group && course.acad_group !== "AS" && (
                         <div className="text-[11px] text-zinc-500">
                           College code <span className="text-zinc-300">{course.acad_group}</span> (B.A. A&amp;S students: non-A&amp;S course cap applies). Always confirm degree audit with your CS advisor.

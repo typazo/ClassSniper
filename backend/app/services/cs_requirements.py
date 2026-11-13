@@ -1056,39 +1056,51 @@ class CSRequirementsIndex:
             for alias in crosslists_by_code.get(seed, ()):
                 seed_aliases.add(alias)
 
-        # Level-0 qualification map: code -> (proof_chain_str, hops)
+        # Level-0 qualification map: evaluate every course's OWN prereqs first (Pass 0a),
+        # then propagate across cross-listed siblings (Pass 0b) so a cross-list never shadows
+        # a course's own qualifying prerequisite.
         direct_reason: dict[str, str] = {}
         bfs_chain: dict[str, tuple[list[str], int]] = {}
         queue: deque[str] = deque()
+        direct_entries: list[tuple[str, str]] = []
 
         for code in course_by_code:
             refs = prereq_codes_map[code]
             cleaned = clean_prereq_text[code]
             reason = ""
+            detail = ""
             chain: list[str] = []
 
             if has_engrd_map[code]:
                 engrd_refs = [r for r in refs if r.startswith("ENGRD ")]
-                reason = f"Prereq: {engrd_refs[0]}" if engrd_refs else "Prereq: ENGRD course"
+                detail = engrd_refs[0] if engrd_refs else "ENGRD course"
+                reason = f"TE rule: lists {detail} prereq"
+                chain = [engrd_refs[0]] if engrd_refs else []
             elif any(r in seed_aliases for r in refs):
                 hit = next(r for r in refs if r in seed_aliases)
-                reason = f"Prereq: {hit}"
+                detail = hit
+                reason = f"TE rule: lists {hit} prereq"
                 chain = [hit]
             else:
                 text_hits = match_qualifying_prereq_text(cleaned)
                 if text_hits:
-                    reason = f"Prereq: {text_hits[0]}"
+                    detail = text_hits[0]
+                    reason = f"TE rule: lists {detail} prereq"
+                    chain = [detail]
 
             if reason:
                 direct_reason[code] = reason
                 bfs_chain[code] = ([code, *chain] if chain else [code], 1)
                 queue.append(code)
-                # Also propagate across cross-listed partners (same underlying course)
-                for partner in crosslists_by_code.get(code, ()):
-                    if partner in course_by_code and partner not in bfs_chain:
-                        direct_reason[partner] = f"{reason} (via {code})"
-                        bfs_chain[partner] = ([code, *chain] if chain else [code], 1)
-                        queue.append(partner)
+                direct_entries.append((code, detail))
+
+        for code, detail in direct_entries:
+            # Propagate across cross-listed partners only when partner has no direct seed of its own
+            for partner in crosslists_by_code.get(code, ()):
+                if partner in course_by_code and partner not in bfs_chain:
+                    direct_reason[partner] = f"TE rule: cross-listed {code} lists {detail} prereq"
+                    bfs_chain[partner] = (bfs_chain[code][0], 1)
+                    queue.append(partner)
 
         # Transitive BFS fixed-point pass (bounded to 4 hops to avoid noisy long chains)
         while queue:
@@ -1097,16 +1109,16 @@ class CSRequirementsIndex:
             if curr_hop >= 4:
                 continue
             for dep in reverse_deps.get(curr, ()):
-                if dep in bfs_chain:
+                if dep in bfs_chain or dep in curr_path:
                     continue
                 new_path = [dep, *curr_path]
                 bfs_chain[dep] = (new_path, curr_hop + 1)
-                direct_reason[dep] = f"Chain: {' -> '.join(curr_path[:3])}"
+                direct_reason[dep] = f"TE rule: prereq chain {' -> '.join(curr_path[:3])}"
                 queue.append(dep)
                 for partner in crosslists_by_code.get(dep, ()):
-                    if partner in course_by_code and partner not in bfs_chain:
+                    if partner in course_by_code and partner not in bfs_chain and partner not in new_path:
                         bfs_chain[partner] = (new_path, curr_hop + 1)
-                        direct_reason[partner] = f"Chain: {' -> '.join(curr_path[:3])}"
+                        direct_reason[partner] = f"TE rule: cross-listed {dep} chain {' -> '.join(curr_path[:3])}"
                         queue.append(partner)
 
         # Evaluate final eligibility & badges for every course
@@ -1170,11 +1182,11 @@ class CSRequirementsIndex:
                 if code == "CS 4999":
                     elig.tech_elective = True
                     elig.tech_elective_is_research = True
-                    elig.tech_elective_reason = "Research credits (CS 4999)"
+                    elig.tech_elective_reason = "CS 4999 research (counts as TE if >=3 cr letter grade)"
                     elig.tech_elective_warning = "Research (CS 4999) · Needs >=3 cr & Letter Grade (max 2 research)"
                 elif subj == "CS" and cat_num >= 3000 and not is_research:
                     elig.tech_elective = True
-                    elig.tech_elective_reason = direct_reason.get(code) or "CS 3000+ Technical Elective"
+                    elig.tech_elective_reason = "CS 3000+ course (auto-qualifies as Tech Elective)"
                     if code in CS_CORE_CHOICE_PAIR:
                         elig.tech_elective_warning = "CS Core option · Counts only if not used for Core"
                     elif cat_num >= 5000:
@@ -1191,7 +1203,7 @@ class CSRequirementsIndex:
                         elig.tech_elective = True
                         elig.tech_elective_is_2000 = is_2000
                         elig.tech_elective_reason = direct_reason.get(code) or (
-                            "CS 2000+ Technical Elective" if subj == "CS" else ""
+                            "CS 2000+ course (max 1 non-core allowed)" if subj == "CS" else ""
                         )
                         if is_2000:
                             elig.tech_elective_warning = "2000-level · Max 1 allowed toward Technical Electives"

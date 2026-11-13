@@ -819,3 +819,68 @@ async def test_per_user_prereqs_isolation_and_search_filtering(tmp_path: Path) -
             opts = (await client_a.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "211"})).json()
             assert any(o["code"] == "CS 2110" for o in opts["options"])
 
+
+def test_te_reason_clarity_crosslist_priority_and_no_cycle() -> None:
+    def _row(
+        subject: str,
+        nbr: str,
+        prereq: str = "",
+        coreq: str = "",
+        crosslists: list[str] | None = None,
+    ) -> dict:
+        return {
+            "subject": subject,
+            "catalog_nbr": nbr,
+            "catalog_num": int("".join(ch for ch in nbr if ch.isdigit()) or "0"),
+            "title_long": f"{subject} {nbr}",
+            "catalog_prereq": prereq,
+            "catalog_coreq": coreq,
+            "crosslists": crosslists or [],
+            "units_min": 3.0,
+            "units_max": 3.0,
+            "has_letter_grade": True,
+            "components": ["LEC"],
+        }
+
+    idx = CSRequirementsIndex(
+        [
+            _row("CHEM", "4810", prereq="MATH 2220.", crosslists=["CHEME 5540"]),
+            _row("CHEME", "5540", prereq="background equivalent to: CS 1110 or CS 1112.", crosslists=["CHEM 4810"]),
+            _row("AAA", "4000", prereq="MATH 2220.", crosslists=["ZZZ 4000"]),
+            _row("ZZZ", "4000", prereq="CS 2110.", crosslists=["AAA 4000"]),
+            _row("CS", "4152", prereq="CS 2110.", crosslists=["INFO 4152"]),
+            _row("INFO", "4152", prereq="CS 2110.", crosslists=["CS 4152"]),
+            _row("CHEM", "2070", coreq="CHEM 2071."),
+            _row("CHEM", "2071", prereq="CHEM 2070."),
+        ]
+    )
+
+    # Cross-listed TE reason is clearly labeled as a TE rule and does not poison enrollment prereq check
+    cheme = idx.get("CHEME", "5540")
+    assert cheme.tech_elective is True
+    assert cheme.tech_elective_reason == "TE rule: cross-listed CHEM 4810 lists MATH 2220 prereq"
+    sat, _ = idx.expand_satisfied_courses(["CS 1110"])
+    ev = idx.evaluate_course_prereqs("CHEME", "5540", sat)
+    assert ev["prereqs_met"] is True
+    assert ev["satisfied_by"] == ["CS 1110"]
+
+    # Pass 0a runs before Pass 0b: alphabetically later sibling keeps its own direct TE reason
+    aaa = idx.get("AAA", "4000")
+    zzz = idx.get("ZZZ", "4000")
+    assert aaa.tech_elective is True
+    assert aaa.tech_elective_reason == "TE rule: lists MATH 2220 prereq"
+    assert zzz.tech_elective is True
+    assert zzz.tech_elective_reason == "TE rule: lists CS 2110 prereq"
+
+    # CS 3000+ course reports direct auto-qualification instead of cross-list/prereq noise
+    cs_4152 = idx.get("CS", "4152")
+    assert cs_4152.tech_elective is True
+    assert cs_4152.tech_elective_reason == "CS 3000+ course (auto-qualifies as Tech Elective)"
+
+    # Coreq/prereq cycle does not produce bogus TE chain back onto CHEM 2070 itself
+    assert idx.get("CHEM", "2070").tech_elective is False
+    chem_2071 = idx.get("CHEM", "2071")
+    assert chem_2071.tech_elective is True
+    assert chem_2071.tech_elective_reason == "TE rule: lists CHEM 2070 prereq"
+
+

@@ -94,6 +94,7 @@ async def search_courses(
     curriculum: Literal["current", "pre2024"] = Query(default="current"),
     only_eligible: bool = Query(default=False),
     include_implied_prereqs: Optional[bool] = Query(default=None),
+    ithaca_or_virtual: bool = Query(default=True),
     refresh_stale: bool = Query(default=True),
     limit: int = Query(default=100, ge=1, le=300),
     user: dict[str, Any] = Depends(get_current_user),
@@ -125,6 +126,7 @@ async def search_courses(
         completed_courses=completed_courses,
         only_eligible=only_eligible,
         include_implied_prereqs=effective_implied,
+        ithaca_or_virtual=ithaca_or_virtual,
         refresh_stale=refresh_stale,
         limit=limit,
     )
@@ -204,7 +206,7 @@ async def get_course_detail(
         """
         SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
                components_required_json, meetings_summary, instructors_summary,
-               campus, instruction_mode, updated_at
+               campus, location, location_descr, instruction_mode, updated_at
         FROM roster_sections
         WHERE roster = ? AND subject = ? AND catalog_nbr = ?
         ORDER BY enroll_group_idx ASC, class_nbr ASC

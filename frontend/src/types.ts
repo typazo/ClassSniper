@@ -43,6 +43,8 @@ export interface CourseSection {
   meetings_summary: string;
   instructors_summary: string;
   campus: string;
+  location?: string;
+  location_descr?: string;
   instruction_mode: string;
   updated_at?: string | null;
 }
@@ -103,6 +105,8 @@ export interface CourseSummary {
   crosslists?: string[];
   components?: string[];
   cs_eligibility?: CourseCSEligibility;
+  hidden_other_location_count?: number;
+  hidden_other_locations?: string[];
   subject_synced_at?: string | null;
   status_is_stale?: boolean;
 }
@@ -110,6 +114,8 @@ export interface CourseSummary {
 export interface SearchCoursesMeta {
   total_matched: number;
   returned: number;
+  filtered_out_location_count?: number;
+  filtered_out_locations?: string[];
   queued_subjects: string[];
   synced_subjects: number;
   total_subjects: number;
@@ -226,6 +232,10 @@ export interface WatchSectionInfo {
   open_status: string;
   meetings_summary: string;
   instructors_summary: string;
+  campus?: string;
+  location?: string;
+  location_descr?: string;
+  instruction_mode?: string;
   updated_at: string | null;
 }
 
@@ -244,6 +254,7 @@ export interface Watch {
   priority: number;
   active: boolean;
   auto_pause: boolean;
+  ithaca_or_virtual?: boolean;
   cooldown_sec: number;
   last_observed_status: string | null;
   last_notified_status: string | null;

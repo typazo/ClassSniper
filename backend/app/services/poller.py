@@ -19,6 +19,7 @@ from app.providers.base import (
     SectionRecord,
     UpstreamUnavailableError,
 )
+from app.providers.cornell import is_ithaca_or_virtual_section
 from app.services.catalog import CatalogSyncService
 from app.services.dispatcher import AlertDispatcher, MatchedAlert
 from app.services.gate import PRIORITY_POLLER, CornellRequestGate
@@ -503,10 +504,19 @@ class PollerEngine:
             elif mode == "any_section":
                 candidates = course_sections_map.get(str(row["catalog_nbr"]), [])
                 comp_filter = (row["component_filter"] or "").strip().upper()
+                ith_only = bool(row.get("ithaca_or_virtual", 0))
                 matching_secs = [
                     (c, s)
                     for (c, s) in candidates
-                    if not comp_filter or s.ssr_component == comp_filter
+                    if (not comp_filter or s.ssr_component == comp_filter)
+                    and (
+                        not ith_only
+                        or is_ithaca_or_virtual_section(
+                            campus=s.campus,
+                            location=s.location,
+                            instruction_mode=s.instruction_mode,
+                        )
+                    )
                 ]
                 if not matching_secs:
                     continue

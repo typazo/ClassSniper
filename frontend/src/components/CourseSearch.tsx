@@ -12,6 +12,7 @@ import {
   ListChecks,
   Loader2,
   Lock,
+  MapPin,
   Search,
 } from "lucide-react";
 import { api } from "../api/client";
@@ -33,6 +34,11 @@ import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
 import { CourseInsightsPanel } from "./CourseInsightsPanel";
 import { MultiSubjectSelect } from "./MultiSubjectSelect";
 import { StatusBadge } from "./StatusBadge";
+import {
+  getSectionLocationTag,
+  getSectionVirtualLabel,
+  summarizeCourseLocation,
+} from "../utils/location";
 
 type StatusFilter = "all" | "open" | "closed" | "waitlist";
 
@@ -111,6 +117,7 @@ interface SearchOverride {
   includeResearchTE?: boolean;
   curriculum?: CSCurriculumMode;
   onlyEligible?: boolean;
+  ithacaOrVirtual?: boolean;
   showCsFeatures?: boolean;
   silent?: boolean;
 }
@@ -130,6 +137,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
   const [include2000TE, setInclude2000TE] = useState(true);
   const [includeResearchTE, setIncludeResearchTE] = useState(true);
   const [onlyEligible, setOnlyEligible] = useState(false);
+  const [ithacaOrVirtual, setIthacaOrVirtual] = useState(true);
   const [prereqsModalOpen, setPrereqsModalOpen] = useState(false);
 
   const [courses, setCourses] = useState<CourseSummary[]>([]);
@@ -215,6 +223,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       const incRes = override?.includeResearchTE ?? includeResearchTE;
       const curr = override?.curriculum ?? curriculum;
       const eligibleOnly = override?.onlyEligible ?? onlyEligible;
+      const ithVirt = override?.ithacaOrVirtual ?? ithacaOrVirtual;
       const silent = Boolean(override?.silent);
 
       if (!q.trim() && subjs.length === 0 && !req && !lvl && !eligibleOnly) {
@@ -243,6 +252,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
           include_research_te: incRes,
           curriculum: curr,
           only_eligible: eligibleOnly,
+          ithaca_or_virtual: ithVirt,
           refresh_stale: true,
           limit: req ? 150 : 100,
         });
@@ -286,7 +296,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         }
       }
     },
-    [selectedRoster, query, selectedSubjects, showCsFeatures, csRequirement, levelMin, include2000TE, includeResearchTE, curriculum, onlyEligible, loadInsights]
+    [selectedRoster, query, selectedSubjects, showCsFeatures, csRequirement, levelMin, include2000TE, includeResearchTE, curriculum, onlyEligible, ithacaOrVirtual, loadInsights]
   );
 
   // Live SSE handler: flip "Loading live status..." -> Open/Waitlist/Closed smoothly in real time
@@ -510,6 +520,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         priority: draft.priority,
         auto_pause: draft.autoPause,
         cooldown_sec: draft.cooldownSec,
+        ithaca_or_virtual: draft.mode === "any_section" ? ithacaOrVirtual : false,
       });
       setSuccessMsg(
         `Armed watch for ${draft.course.subject} ${draft.course.catalog_nbr}${
@@ -802,6 +813,34 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                 />
                 <span>Only prereqs met</span>
               </label>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const nextVal = !ithacaOrVirtual;
+                  setIthacaOrVirtual(nextVal);
+                  if (
+                    hasSearchedRef.current ||
+                    csRequirement ||
+                    selectedSubjects.length > 0 ||
+                    query.trim() ||
+                    levelMin ||
+                    onlyEligible
+                  ) {
+                    void executeSearch({ ithacaOrVirtual: nextVal });
+                  }
+                }}
+                aria-pressed={ithacaOrVirtual}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  ithacaOrVirtual
+                    ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
+                    : "border-amber-500/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                }`}
+                title="Hide Cornell Tech (NYC) and other off-campus courses/sections; keep Ithaca campus and purely virtual (OL, DL-AD, DL-SD) offerings."
+              >
+                <MapPin className={`h-3.5 w-3.5 ${ithacaOrVirtual ? "text-emerald-400" : "text-amber-300"}`} />
+                <span>{ithacaOrVirtual ? "Ithaca + Virtual Only" : "All Locations (incl. Cornell Tech)"}</span>
+              </button>
             </div>
           </div>
 
@@ -856,6 +895,33 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         </div>
       )}
 
+      {!loading && courses.length === 0 && ithacaOrVirtual && (searchMeta?.filtered_out_location_count ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          <div className="flex items-center gap-2">
+            <MapPin className="h-4 w-4 shrink-0 text-amber-300" />
+            <span>
+              {searchMeta!.filtered_out_location_count} matching course
+              {searchMeta!.filtered_out_location_count === 1 ? " was" : "s were"} hidden because{" "}
+              {searchMeta!.filtered_out_location_count === 1 ? "it is" : "they are"} only offered at{" "}
+              <span className="font-semibold text-white">
+                {(searchMeta?.filtered_out_locations || []).join(", ") || "an off-campus location"}
+              </span>{" "}
+              (not Ithaca or purely virtual).
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setIthacaOrVirtual(false);
+              void executeSearch({ ithacaOrVirtual: false });
+            }}
+            className="rounded-lg border border-amber-400/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500/30"
+          >
+            Show All Locations
+          </button>
+        </div>
+      )}
+
       {courses.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -891,6 +957,24 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
             )}
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+            {ithacaOrVirtual && (searchMeta?.filtered_out_location_count ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIthacaOrVirtual(false);
+                  void executeSearch({ ithacaOrVirtual: false });
+                }}
+                className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+                title={`Hidden off-campus courses (${(searchMeta?.filtered_out_locations || []).join(", ")})`}
+              >
+                <MapPin className="h-3 w-3 text-amber-300" />
+                {searchMeta?.filtered_out_location_count} off-campus hidden
+                {(searchMeta?.filtered_out_locations?.length ?? 0) > 0
+                  ? ` (${searchMeta!.filtered_out_locations!.slice(0, 2).join(", ")})`
+                  : ""}
+                {" · Show all"}
+              </button>
+            )}
             {staleVisibleCount > 0 && (
               <span className="inline-flex items-center gap-1.5 text-amber-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -918,6 +1002,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
           }
 
           const elig = course.cs_eligibility;
+          const locSummary = summarizeCourseLocation(course.sections);
           const creditsLabel = formatCredits(course.units_min, course.units_max);
           const collegeMeta = [course.acad_career, course.acad_group].filter(Boolean).join(" · ");
           const activeWarning = !showCsFeatures
@@ -983,6 +1068,36 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                             </span>
                           )}
                         </>
+                      )}
+
+                      {locSummary.offCampusLabels.map((locLabel) => (
+                        <span
+                          key={locLabel}
+                          className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200"
+                          title={`Offered at off-campus location: ${locLabel}`}
+                        >
+                          <MapPin className="h-2.5 w-2.5 text-amber-300" />
+                          {locLabel}
+                        </span>
+                      ))}
+                      {locSummary.allVirtual && (
+                        <span className="rounded-md border border-cyan-500/35 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-200">
+                          Virtual
+                        </span>
+                      )}
+                      {!locSummary.allVirtual && locSummary.someVirtual && (
+                        <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-medium text-cyan-300">
+                          Virtual avail.
+                        </span>
+                      )}
+                      {(course.hidden_other_location_count ?? 0) > 0 && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                          title={`Hidden section(s) at ${(course.hidden_other_locations || []).join(", ")}`}
+                        >
+                          +{course.hidden_other_location_count}{" "}
+                          {(course.hidden_other_locations || []).join(", ") || "off-campus"} hidden
+                        </span>
                       )}
 
                       {showCsFeatures &&
@@ -1157,43 +1272,63 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                         )}
                       </div>
                       <div className="divide-y divide-zinc-800/70">
-                        {secs.map((sec) => (
-                          <div
-                            key={sec.class_nbr}
-                            className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-1 last:pb-1"
-                          >
-                            <div className="min-w-0 space-y-0.5">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-sm font-semibold text-white">
-                                  {sec.ssr_component} {sec.section}
-                                </span>
-                                <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-zinc-300">
-                                  #{sec.class_nbr}
-                                </span>
-                                {course.status_is_stale ? (
-                                  <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800 px-2.5 py-0.5 text-[11px] font-medium text-zinc-300">
-                                    <Loader2 className="h-3 w-3 animate-spin text-emerald-400" />
-                                    Loading...
-                                  </span>
-                                ) : (
-                                  <StatusBadge status={sec.open_status} />
-                                )}
-                              </div>
-                              <div className="text-xs text-zinc-400">
-                                {sec.meetings_summary} &middot; {sec.instructors_summary}
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => openSectionDraft(course, sec)}
-                              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
+                        {secs.map((sec) => {
+                          const secLoc = getSectionLocationTag(sec);
+                          const virtualLabel = getSectionVirtualLabel(sec.instruction_mode);
+                          return (
+                            <div
+                              key={sec.class_nbr}
+                              className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-1 last:pb-1"
                             >
-                              <BellPlus className="h-3.5 w-3.5" />
-                              Snipe
-                            </button>
-                          </div>
-                        ))}
+                              <div className="min-w-0 space-y-0.5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-sm font-semibold text-white">
+                                    {sec.ssr_component} {sec.section}
+                                  </span>
+                                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-zinc-300">
+                                    #{sec.class_nbr}
+                                  </span>
+                                  {course.status_is_stale ? (
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800 px-2.5 py-0.5 text-[11px] font-medium text-zinc-300">
+                                      <Loader2 className="h-3 w-3 animate-spin text-emerald-400" />
+                                      Loading...
+                                    </span>
+                                  ) : (
+                                    <StatusBadge status={sec.open_status} />
+                                  )}
+                                  {secLoc.isOffCampus ? (
+                                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
+                                      <AlertTriangle className="h-2.5 w-2.5 text-amber-300" />
+                                      {secLoc.label}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                                      <MapPin className="h-2.5 w-2.5 text-zinc-500" />
+                                      {secLoc.label}
+                                    </span>
+                                  )}
+                                  {virtualLabel && (
+                                    <span className="rounded-md border border-cyan-500/35 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-200">
+                                      {virtualLabel}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-zinc-400">
+                                  {sec.meetings_summary} &middot; {sec.instructors_summary}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => openSectionDraft(course, sec)}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
+                              >
+                                <BellPlus className="h-3.5 w-3.5" />
+                                Snipe
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}
@@ -1268,6 +1403,17 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                   <option value="DIS">Discussions Only (DIS)</option>
                   <option value="LAB">Labs Only (LAB)</option>
                 </select>
+                {ithacaOrVirtual ? (
+                  <p className="mt-1.5 flex items-center gap-1 text-[11px] text-emerald-300/90">
+                    <MapPin className="h-3 w-3 shrink-0" />
+                    Scoped to Ithaca campus &amp; virtual sections only (ignores off-campus sections like Cornell Tech).
+                  </p>
+                ) : (
+                  <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-300/90">
+                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                    Includes all campus locations (including Cornell Tech &amp; off-campus sections).
+                  </p>
+                )}
               </div>
             )}
 

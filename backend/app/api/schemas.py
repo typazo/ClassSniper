@@ -37,6 +37,7 @@ class CreateWatchRequest(BaseModel):
     trigger_on: Literal["open", "open_or_waitlist"] = "open"
     priority: int = Field(default=1, ge=1, le=2)
     auto_pause: bool = False
+    ithaca_or_virtual: bool = False
     cooldown_sec: int = Field(default=60, ge=0, le=86400)
 
 

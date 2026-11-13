@@ -14,7 +14,7 @@ import orjson
 
 from app.db import Database, build_fts_query
 from app.providers.base import AvailabilityProvider, CourseRecord, RateLimitedError, UpstreamUnavailableError
-from app.providers.cornell import compute_course_derived_fields
+from app.providers.cornell import compute_course_derived_fields, is_ithaca_or_virtual_section
 from app.services.cs_requirements import (
     PRIORITY_STEM_SUBJECTS,
     CourseEligibility,
@@ -289,9 +289,10 @@ class CatalogSyncService:
                         INSERT INTO roster_sections (
                             roster, subject, catalog_nbr, class_nbr, enroll_group_idx,
                             ssr_component, section, open_status, components_required_json,
-                            meetings_summary, instructors_summary, campus, instruction_mode, updated_at
+                            meetings_summary, instructors_summary, campus, location, location_descr,
+                            instruction_mode, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         """,
                         (
                             roster_u,
@@ -306,6 +307,8 @@ class CatalogSyncService:
                             sec.meetings_summary,
                             sec.instructors_summary,
                             sec.campus,
+                            sec.location,
+                            sec.location_descr,
                             sec.instruction_mode,
                         ),
                     )
@@ -752,6 +755,69 @@ class CatalogSyncService:
 
         return sorted(rows, key=sort_key)
 
+    async def _fetch_sections_for_courses(
+        self,
+        roster_u: str,
+        courses: list[dict[str, Any]],
+    ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        """Batch-fetch sections for candidate courses using the fewest indexed SQLite queries."""
+        sec_by_course: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        if not courses:
+            return sec_by_course
+
+        select_sql = """
+            SELECT subject, catalog_nbr, class_nbr, enroll_group_idx, ssr_component, section,
+                   open_status, components_required_json, meetings_summary,
+                   instructors_summary, campus, location, location_descr, instruction_mode
+            FROM roster_sections
+        """
+        course_keys = {(str(c["subject"]).upper(), str(c["catalog_nbr"])) for c in courses}
+        unique_subjects = sorted({subj for subj, _ in course_keys})
+
+        rows: list[dict[str, Any]] = []
+        if len(courses) > 450 and len(unique_subjects) > 40:
+            rows = await self.db.fetch_all(
+                f"{select_sql} WHERE roster = ? ORDER BY enroll_group_idx ASC, class_nbr ASC",
+                (roster_u,),
+            )
+        elif len(courses) > 150 and len(unique_subjects) <= 40:
+            qmarks = ", ".join("?" for _ in unique_subjects)
+            rows = await self.db.fetch_all(
+                f"""
+                {select_sql}
+                WHERE roster = ? AND subject IN ({qmarks})
+                ORDER BY enroll_group_idx ASC, class_nbr ASC
+                """,
+                [roster_u, *unique_subjects],
+            )
+        else:
+            keys_list = list(course_keys)
+            for start in range(0, len(keys_list), 150):
+                chunk = keys_list[start : start + 150]
+                placeholders = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in chunk)
+                sec_params: list[Any] = [roster_u]
+                for subj, cat in chunk:
+                    sec_params.extend([subj, cat])
+                rows.extend(
+                    await self.db.fetch_all(
+                        f"""
+                        {select_sql}
+                        WHERE roster = ? AND ({placeholders})
+                        ORDER BY enroll_group_idx ASC, class_nbr ASC
+                        """,
+                        sec_params,
+                    )
+                )
+
+        for sec in rows:
+            key = (str(sec["subject"]).upper(), str(sec["catalog_nbr"]))
+            if key not in course_keys:
+                continue
+            sec["components_required"] = _decode_json_list(sec.pop("components_required_json", "[]"))
+            sec_by_course.setdefault(key, []).append(sec)
+
+        return sec_by_course
+
     async def search_courses_advanced(
         self,
         roster: str,
@@ -766,6 +832,7 @@ class CatalogSyncService:
         completed_courses: Optional[list[str]] = None,
         only_eligible: bool = False,
         include_implied_prereqs: bool = True,
+        ithaca_or_virtual: bool = True,
         refresh_stale: bool = True,
         limit: int = 100,
     ) -> dict[str, Any]:
@@ -835,7 +902,7 @@ class CatalogSyncService:
             effective_level_min = 3000
 
         fts_expr = build_fts_query(query_clean)
-        sql_limit = 4500 if (req_mode or only_eligible) else max(limit, 200)
+        sql_limit = 4500 if (req_mode or only_eligible or ithaca_or_virtual) else max(limit, 200)
 
         where_extra: list[str] = []
         extra_params: list[Any] = []
@@ -957,6 +1024,46 @@ class CatalogSyncService:
                 if prereq_by_course[(c["subject"].upper(), str(c["catalog_nbr"]).upper())]["prereqs_met"]
             ]
 
+        sec_by_course = await self._fetch_sections_for_courses(roster_u, courses)
+        hidden_by_course: dict[tuple[str, str], list[str]] = {}
+        filtered_out_location_count = 0
+        filtered_out_locations_set: set[str] = set()
+
+        if ithaca_or_virtual and courses:
+            location_kept: list[dict[str, Any]] = []
+            for c in courses:
+                key = (str(c["subject"]).upper(), str(c["catalog_nbr"]))
+                all_secs = sec_by_course.get(key, [])
+                if not all_secs:
+                    location_kept.append(c)
+                    continue
+                kept_secs: list[dict[str, Any]] = []
+                hidden_locs: list[str] = []
+                for sec in all_secs:
+                    if is_ithaca_or_virtual_section(
+                        campus=str(sec.get("campus") or ""),
+                        location=str(sec.get("location") or ""),
+                        instruction_mode=str(sec.get("instruction_mode") or ""),
+                    ):
+                        kept_secs.append(sec)
+                    else:
+                        loc_label = (
+                            str(sec.get("location_descr") or "").strip()
+                            or str(sec.get("location") or "").strip()
+                            or str(sec.get("campus") or "").strip()
+                            or "Off-campus"
+                        )
+                        hidden_locs.append(loc_label)
+                        filtered_out_locations_set.add(loc_label)
+                if kept_secs:
+                    sec_by_course[key] = kept_secs
+                    if hidden_locs:
+                        hidden_by_course[key] = hidden_locs
+                    location_kept.append(c)
+                else:
+                    filtered_out_location_count += 1
+            courses = location_kept
+
         courses = self._sort_courses(
             courses,
             cs_index=cs_index,
@@ -965,35 +1072,6 @@ class CatalogSyncService:
         )
         total_matched = len(courses)
         courses = courses[:limit]
-
-        # Batch fetch sections & annotate freshness + CS eligibility
-        if courses:
-            keys = [(c["subject"], c["catalog_nbr"]) for c in courses]
-            sec_by_course: dict[tuple[str, str], list[dict[str, Any]]] = {}
-            # Chunk keys cleanly to stay comfortably within SQLite parameter limit
-            for start in range(0, len(keys), 150):
-                chunk = keys[start : start + 150]
-                placeholders = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in chunk)
-                sec_params: list[Any] = [roster_u]
-                for subj, cat in chunk:
-                    sec_params.extend([subj, cat])
-
-                sections = await self.db.fetch_all(
-                    f"""
-                    SELECT subject, catalog_nbr, class_nbr, enroll_group_idx, ssr_component, section,
-                           open_status, components_required_json, meetings_summary,
-                           instructors_summary, campus, instruction_mode
-                    FROM roster_sections
-                    WHERE roster = ? AND ({placeholders})
-                    ORDER BY enroll_group_idx ASC, class_nbr ASC
-                    """,
-                    sec_params,
-                )
-                for sec in sections:
-                    sec["components_required"] = json.loads(sec.pop("components_required_json", "[]"))
-                    sec_by_course.setdefault((sec["subject"], sec["catalog_nbr"]), []).append(sec)
-        else:
-            sec_by_course = {}
 
         # Compute freshness once per visible subject
         visible_subjects: list[str] = []
@@ -1016,10 +1094,13 @@ class CatalogSyncService:
             su = str(c["subject"]).upper()
             nbr = str(c["catalog_nbr"])
             is_fresh, eff_iso = freshness_by_subj.get(su, (False, None))
+            hidden_locs = hidden_by_course.get((su, nbr), [])
             c["crosslists"] = _decode_json_list(c.pop("crosslists_json", "[]"))
             c["components"] = _decode_json_list(c.pop("components_json", "[]"))
             c["has_letter_grade"] = bool(c.get("has_letter_grade", 1))
             c["sections"] = sec_by_course.get((su, nbr), [])
+            c["hidden_other_location_count"] = len(hidden_locs)
+            c["hidden_other_locations"] = sorted(set(hidden_locs))
             c["external_links"] = build_external_links(c["roster"], su, nbr)
             prereq_eval = prereq_by_course.get((su, str(nbr).upper())) or cs_index.evaluate_course_prereqs(
                 su,
@@ -1049,6 +1130,8 @@ class CatalogSyncService:
             "meta": {
                 "total_matched": total_matched,
                 "returned": len(courses),
+                "filtered_out_location_count": filtered_out_location_count,
+                "filtered_out_locations": sorted(filtered_out_locations_set)[:6],
                 "queued_subjects": queued_subjects,
                 "synced_subjects": coverage["synced_subjects"],
                 "total_subjects": coverage["total_subjects"],

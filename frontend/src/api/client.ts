@@ -99,6 +99,7 @@ export const api = {
       curriculum?: CSCurriculumMode;
       only_eligible?: boolean;
       include_implied_prereqs?: boolean;
+      ithaca_or_virtual?: boolean;
       refresh_stale?: boolean;
       limit?: number;
     }
@@ -123,6 +124,9 @@ export const api = {
     }
     if (options?.include_implied_prereqs !== undefined) {
       params.set("include_implied_prereqs", String(options.include_implied_prereqs));
+    }
+    if (options?.ithaca_or_virtual !== undefined) {
+      params.set("ithaca_or_virtual", String(options.ithaca_or_virtual));
     }
     if (options?.refresh_stale !== undefined) {
       params.set("refresh_stale", String(options.refresh_stale));
@@ -184,6 +188,7 @@ export const api = {
     trigger_on: "open" | "open_or_waitlist";
     priority: number;
     auto_pause: boolean;
+    ithaca_or_virtual?: boolean;
     cooldown_sec: number;
   }) =>
     request<{ watch: Watch }>("/api/watches", {

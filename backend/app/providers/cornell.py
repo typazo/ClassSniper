@@ -20,7 +20,49 @@ from app.providers.base import (
 )
 
 LETTER_GRADE_BASES: frozenset[str] = frozenset({"GRD", "GRI", "OPT", "OPI"})
+ITHACA_LOCATIONS: frozenset[str] = frozenset({"ITH"})
+ITHACA_FALLBACK_CAMPUSES: frozenset[str] = frozenset({"", "MAIN"})
+VIRTUAL_INSTRUCTION_MODES: frozenset[str] = frozenset(
+    {
+        "OL",
+        "AD",
+        "DL-AD",
+        "SD",
+        "DL-SD",
+        "ONLINE",
+        "DISTANCE LEARNING-ONLINE",
+        "DISTANCE LEARNING-ASYNCHRONOUS",
+        "DISTANCE LEARNING-SYNCHRONOUS",
+    }
+)
+VIRTUAL_ALLOWED_LOCATIONS: frozenset[str] = frozenset(
+    {"", "ITH", "ONLINE", "VIRT", "VIRTUAL", "DIST", "REMOTE", "WEB"}
+)
 _CATALOG_DIGITS_RE = re.compile(r"(\d+)")
+
+
+def is_virtual_instruction_mode(instruction_mode: str = "") -> bool:
+    """Return True if instruction mode represents purely virtual delivery (OL, DL-AD, DL-SD)."""
+    mode = (instruction_mode or "").strip().upper()
+    return mode in VIRTUAL_INSTRUCTION_MODES or mode.startswith("DL-")
+
+
+def is_ithaca_or_virtual_section(
+    campus: str = "",
+    location: str = "",
+    instruction_mode: str = "",
+) -> bool:
+    """Return True if a section is based on the Ithaca campus or offered virtually without an off-campus cohort lock."""
+    loc = (location or "").strip().upper()
+    camp = (campus or "").strip().upper()
+
+    if loc in ITHACA_LOCATIONS:
+        return True
+    if not loc and camp in ITHACA_FALLBACK_CAMPUSES:
+        return True
+    if is_virtual_instruction_mode(instruction_mode) and loc in VIRTUAL_ALLOWED_LOCATIONS:
+        return True
+    return False
 
 
 def parse_catalog_num(catalog_nbr: str) -> int:
@@ -178,7 +220,9 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
                         components_required=req_comps,
                         meetings_summary=meetings_summary,
                         instructors_summary=instructors_summary,
-                        campus=str(sec.get("campus") or "").strip(),
+                        campus=str(sec.get("campus") or "").strip().upper(),
+                        location=str(sec.get("location") or "").strip().upper(),
+                        location_descr=str(sec.get("locationDescr") or "").strip(),
                         instruction_mode=str(sec.get("instrModeDescrshort") or sec.get("instructionMode") or "").strip(),
                     )
                 )

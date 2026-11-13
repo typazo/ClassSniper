@@ -1,8 +1,10 @@
 import React, { useState } from "react";
 import {
+  AlertTriangle,
   Check,
   Copy,
   ExternalLink,
+  MapPin,
   Pause,
   Play,
   RefreshCw,
@@ -11,6 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import type { Watch } from "../types";
+import { getSectionLocationTag, getSectionVirtualLabel } from "../utils/location";
 import { copyText } from "../utils/pwa";
 import { StatusBadge } from "./StatusBadge";
 
@@ -112,6 +115,8 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
       {watches.map((w) => {
         const isHighlighted = highlightClassNbr !== null && w.class_nbr === highlightClassNbr;
         const secInfo = w.section_info;
+        const secLoc = secInfo ? getSectionLocationTag(secInfo) : null;
+        const virtualLabel = secInfo ? getSectionVirtualLabel(secInfo.instruction_mode) : null;
         const rosterUrl = `https://classes.cornell.edu/browse/roster/${w.roster}/class/${w.subject}/${w.catalog_nbr}`;
         return (
           <div
@@ -134,6 +139,29 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                     {w.subject} {w.catalog_nbr}
                   </h3>
                   {secInfo && <StatusBadge status={secInfo.open_status} />}
+                  {secLoc?.isOffCampus && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
+                      <AlertTriangle className="h-3 w-3 text-amber-300" />
+                      {secLoc.label}
+                    </span>
+                  )}
+                  {secLoc && !secLoc.isOffCampus && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-400">
+                      <MapPin className="h-3 w-3 text-zinc-500" />
+                      {secLoc.label}
+                    </span>
+                  )}
+                  {virtualLabel && (
+                    <span className="rounded-md border border-cyan-500/35 bg-cyan-500/15 px-2 py-0.5 text-[11px] font-medium text-cyan-200">
+                      {virtualLabel}
+                    </span>
+                  )}
+                  {w.mode === "any_section" && w.ithaca_or_virtual && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                      <MapPin className="h-3 w-3" />
+                      Ithaca + Virtual
+                    </span>
+                  )}
                   {!w.active && (
                     <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
                       PAUSED

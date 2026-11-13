@@ -49,6 +49,8 @@ class SectionRecord:
     meetings_summary: str = ""
     instructors_summary: str = ""
     campus: str = ""
+    location: str = ""
+    location_descr: str = ""
     instruction_mode: str = ""
 
 

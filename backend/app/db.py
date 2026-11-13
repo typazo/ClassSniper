@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Optional
 
 import aiosqlite
+import orjson
 
 SCHEMA_SQL = """
 PRAGMA journal_mode = WAL;
@@ -97,6 +98,8 @@ CREATE TABLE IF NOT EXISTS roster_sections (
     meetings_summary TEXT NOT NULL DEFAULT '',
     instructors_summary TEXT NOT NULL DEFAULT '',
     campus TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
+    location_descr TEXT NOT NULL DEFAULT '',
     instruction_mode TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (roster, class_nbr)
@@ -133,6 +136,7 @@ CREATE TABLE IF NOT EXISTS watches (
     priority INTEGER NOT NULL DEFAULT 1,
     active INTEGER NOT NULL DEFAULT 1,
     auto_pause INTEGER NOT NULL DEFAULT 0,
+    ithaca_or_virtual INTEGER NOT NULL DEFAULT 0,
     cooldown_sec INTEGER NOT NULL DEFAULT 60,
     last_observed_status TEXT,
     last_notified_status TEXT,
@@ -241,6 +245,15 @@ _COURSES_META_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("components_json", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
+_ROSTER_SECTIONS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("location", "TEXT NOT NULL DEFAULT ''"),
+    ("location_descr", "TEXT NOT NULL DEFAULT ''"),
+)
+
+_WATCHES_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("ithaca_or_virtual", "INTEGER NOT NULL DEFAULT 0"),
+)
+
 
 class Database:
     """Managed async SQLite connection with serialized write lock."""
@@ -255,32 +268,76 @@ class Database:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
-        await self._migrate_users()
+        await self._ensure_columns("users", _USERS_MIGRATIONS)
         await self._migrate_courses_meta()
+        await self._migrate_roster_sections()
+        await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
         await self._conn.commit()
 
-    async def _migrate_users(self) -> None:
-        """Add per-user preference columns idempotently on existing SQLite databases."""
-        cursor = await self.conn.execute("PRAGMA table_info(users)")
+    async def _ensure_columns(
+        self,
+        table: str,
+        migrations: tuple[tuple[str, str], ...],
+    ) -> set[str]:
+        """Add missing columns idempotently and return the column set that existed beforehand."""
+        cursor = await self.conn.execute(f"PRAGMA table_info({table})")
         existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
-        for col_name, col_def in _USERS_MIGRATIONS:
+        for col_name, col_def in migrations:
             if col_name not in existing_cols:
-                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}")
+                await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+        return existing_cols
 
     async def _migrate_courses_meta(self) -> None:
         """Add CS-elective metadata columns idempotently on existing SQLite databases."""
-        cursor = await self.conn.execute("PRAGMA table_info(courses_meta)")
-        existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
-        had_metadata = "acad_group" in existing_cols
-        for col_name, col_def in _COURSES_META_MIGRATIONS:
-            if col_name not in existing_cols:
-                await self.conn.execute(f"ALTER TABLE courses_meta ADD COLUMN {col_name} {col_def}")
+        existing_cols = await self._ensure_columns("courses_meta", _COURSES_META_MIGRATIONS)
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_courses_meta_roster_level ON courses_meta (roster, subject, catalog_num)"
         )
-        if not had_metadata:
+        if "acad_group" not in existing_cols:
             # Force cached subjects from older DB schema to re-sync prereq and college metadata cleanly
             await self.conn.execute("UPDATE subjects SET synced_at = NULL WHERE synced_at IS NOT NULL")
+
+    async def _migrate_roster_sections(self) -> None:
+        """Add location metadata columns and backfill cached sections from enroll_groups_json."""
+        existing_cols = await self._ensure_columns("roster_sections", _ROSTER_SECTIONS_MIGRATIONS)
+        if "location" in existing_cols:
+            return
+
+        cursor = await self.conn.execute("SELECT roster, enroll_groups_json FROM courses_meta")
+        rows = await cursor.fetchall()
+        updates: list[tuple[str, str, str, str, int]] = []
+        for row in rows:
+            roster = str(row["roster"])
+            try:
+                egs = orjson.loads(row["enroll_groups_json"])
+            except Exception:
+                continue
+            if not isinstance(egs, list):
+                continue
+            for eg in egs:
+                for sec in eg.get("classSections") or []:
+                    class_nbr_raw = sec.get("classNbr")
+                    if class_nbr_raw is None:
+                        continue
+                    try:
+                        class_nbr = int(class_nbr_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    campus = str(sec.get("campus") or "").strip().upper()
+                    loc = str(sec.get("location") or "").strip().upper()
+                    loc_descr = str(sec.get("locationDescr") or "").strip()
+                    if campus or loc or loc_descr:
+                        updates.append((campus, loc, loc_descr, roster, class_nbr))
+
+        if updates:
+            await self.conn.executemany(
+                """
+                UPDATE roster_sections
+                SET campus = ?, location = ?, location_descr = ?
+                WHERE roster = ? AND class_nbr = ?
+                """,
+                updates,
+            )
 
     async def close(self) -> None:
         if self._conn is not None:

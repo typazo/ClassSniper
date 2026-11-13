@@ -15,6 +15,7 @@ from app.db import Database
 from app.services.catalog import CatalogSyncService
 from app.services.poller import PollerEngine, _is_linked_group_ready, _target_statuses
 from app.providers.base import SectionRecord
+from app.providers.cornell import is_ithaca_or_virtual_section
 
 router = APIRouter(prefix="/api/watches", tags=["watches"])
 
@@ -36,11 +37,14 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
         item = dict(w)
         item["active"] = bool(item["active"])
         item["auto_pause"] = bool(item["auto_pause"])
+        ith_only = bool(item.get("ithaca_or_virtual", 0))
+        item["ithaca_or_virtual"] = ith_only
         if w["class_nbr"] is not None:
             sec = await db.fetch_one(
                 """
                 SELECT ssr_component, section, open_status, meetings_summary,
-                       instructors_summary, updated_at
+                       instructors_summary, campus, location, location_descr,
+                       instruction_mode, updated_at
                 FROM roster_sections
                 WHERE roster = ? AND class_nbr = ?
                 """,
@@ -50,22 +54,39 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
         else:
             sec_rows = await db.fetch_all(
                 """
-                SELECT class_nbr, ssr_component, section, open_status
+                SELECT class_nbr, ssr_component, section, open_status,
+                       campus, location, location_descr, instruction_mode
                 FROM roster_sections
                 WHERE roster = ? AND subject = ? AND catalog_nbr = ?
                 """,
                 (w["roster"], w["subject"], w["catalog_nbr"]),
             )
             comp = (w.get("component_filter") or "").strip().upper()
-            filtered = [s for s in sec_rows if not comp or s["ssr_component"] == comp]
+            filtered = [
+                s
+                for s in sec_rows
+                if (not comp or s["ssr_component"] == comp)
+                and (
+                    not ith_only
+                    or is_ithaca_or_virtual_section(
+                        campus=str(s.get("campus") or ""),
+                        location=str(s.get("location") or ""),
+                        instruction_mode=str(s.get("instruction_mode") or ""),
+                    )
+                )
+            ]
             open_cnt = sum(1 for s in filtered if s["open_status"] == "O")
             wait_cnt = sum(1 for s in filtered if s["open_status"] == "W")
             item["section_info"] = {
                 "ssr_component": comp or "ANY",
                 "section": f"{open_cnt}/{len(filtered)} open",
                 "open_status": "O" if open_cnt > 0 else ("W" if wait_cnt > 0 else "C"),
-                "meetings_summary": f"{len(filtered)} matching sections",
+                "meetings_summary": f"{len(filtered)} matching {'Ithaca/virtual ' if ith_only else ''}sections",
                 "instructors_summary": "",
+                "campus": "MAIN" if ith_only else "",
+                "location": "ITH" if ith_only else "",
+                "location_descr": "Ithaca / Virtual" if ith_only else "",
+                "instruction_mode": "",
                 "updated_at": None,
             }
         enriched.append(item)
@@ -208,7 +229,7 @@ async def create_watch(
     else:
         sec_rows = await db.fetch_all(
             """
-            SELECT class_nbr, ssr_component, open_status
+            SELECT class_nbr, ssr_component, open_status, campus, location, instruction_mode
             FROM roster_sections
             WHERE roster = ? AND subject = ? AND catalog_nbr = ?
             """,
@@ -217,19 +238,37 @@ async def create_watch(
         for r in sec_rows:
             poller.seed_section_status(roster_u, int(r["class_nbr"]), r["open_status"])
         targets = _target_statuses(body.trigger_on)
-        filtered = [r for r in sec_rows if not comp_filter or r["ssr_component"] == comp_filter]
+        filtered = [
+            r
+            for r in sec_rows
+            if (not comp_filter or r["ssr_component"] == comp_filter)
+            and (
+                not body.ithaca_or_virtual
+                or is_ithaca_or_virtual_section(
+                    campus=str(r.get("campus") or ""),
+                    location=str(r.get("location") or ""),
+                    instruction_mode=str(r.get("instruction_mode") or ""),
+                )
+            )
+        ]
+        if body.ithaca_or_virtual and sec_rows and not filtered:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No Ithaca or virtual sections match this watch filter",
+            )
         last_observed = "OPEN_ANY" if any(r["open_status"] in targets for r in filtered) else "NONE_OPEN"
 
     priority = body.priority if user["role"] == "admin" else 1
+    ith_flag = 1 if (body.mode == "any_section" and body.ithaca_or_virtual) else 0
 
     cursor = await db.execute(
         """
         INSERT INTO watches (
             user_id, roster, subject, catalog_nbr, course_title,
             class_nbr, enroll_group_idx, component_filter, mode, trigger_on,
-            priority, active, auto_pause, cooldown_sec, last_observed_status
+            priority, active, auto_pause, ithaca_or_virtual, cooldown_sec, last_observed_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         """,
         (
             user["id"],
@@ -244,6 +283,7 @@ async def create_watch(
             body.trigger_on,
             priority,
             1 if body.auto_pause else 0,
+            ith_flag,
             body.cooldown_sec,
             last_observed,
         ),

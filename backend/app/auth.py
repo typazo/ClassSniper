@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 
 from app.config import Settings, get_settings
 from app.db import Database
+from app.services.cs_requirements import decode_completed_courses
 
 _ph = PasswordHasher()
 
@@ -119,7 +120,8 @@ async def get_current_user(
     user = await db.fetch_one(
         """
         SELECT id, username, role, priority_tier, discord_user_id,
-               discord_ping_enabled, personal_webhook_url, web_push_enabled, created_at
+               discord_ping_enabled, personal_webhook_url, web_push_enabled,
+               completed_courses_json, include_implied_prereqs, show_cs_features, created_at
         FROM users
         WHERE id = ?
         """,
@@ -127,7 +129,14 @@ async def get_current_user(
     )
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists")
-    return user
+    raw_implied = user.get("include_implied_prereqs")
+    raw_show_cs = user.get("show_cs_features")
+    return {
+        **user,
+        "completed_courses": decode_completed_courses(user.get("completed_courses_json")),
+        "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
+        "show_cs_features": True if raw_show_cs is None else bool(raw_show_cs),
+    }
 
 
 async def get_admin_user(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:

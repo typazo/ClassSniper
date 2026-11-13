@@ -10,10 +10,12 @@ import type {
   InviteItem,
   MetricsResponse,
   NotifyPreferences,
+  PrereqCourseOption,
   Roster,
   SearchCoursesMeta,
   Subject,
   User,
+  UserPrereqsResponse,
   Watch,
 } from "../types";
 
@@ -74,6 +76,11 @@ export const api = {
       body: JSON.stringify({ invite_code, username, password }),
     }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
+  updateUserPreferences: (patch: { show_cs_features: boolean }) =>
+    request<{ user: User }>("/api/auth/preferences", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
 
   listRosters: () => request<{ rosters: Roster[] }>("/api/rosters"),
   listSubjects: (roster: string) =>
@@ -90,6 +97,8 @@ export const api = {
       include_2000_te?: boolean;
       include_research_te?: boolean;
       curriculum?: CSCurriculumMode;
+      only_eligible?: boolean;
+      include_implied_prereqs?: boolean;
       refresh_stale?: boolean;
       limit?: number;
     }
@@ -109,6 +118,12 @@ export const api = {
       params.set("include_research_te", String(options.include_research_te));
     }
     if (options?.curriculum) params.set("curriculum", options.curriculum);
+    if (options?.only_eligible !== undefined) {
+      params.set("only_eligible", String(options.only_eligible));
+    }
+    if (options?.include_implied_prereqs !== undefined) {
+      params.set("include_implied_prereqs", String(options.include_implied_prereqs));
+    }
     if (options?.refresh_stale !== undefined) {
       params.set("refresh_stale", String(options.refresh_stale));
     }
@@ -135,6 +150,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ roster, subject }),
     }),
+  getUserPrereqs: (roster?: string) =>
+    request<UserPrereqsResponse>(
+      `/api/user/prereqs${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`
+    ),
+  updateUserPrereqs: (
+    payload: { completed_courses: string[]; include_implied_prereqs?: boolean },
+    roster?: string
+  ) =>
+    request<UserPrereqsResponse>(
+      `/api/user/prereqs${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }
+    ),
+  getPrereqOptions: (roster: string, q = "", limit = 30) => {
+    const params = new URLSearchParams({ roster, q, limit: String(limit) });
+    return request<{ roster: string; options: PrereqCourseOption[] }>(
+      `/api/user/prereqs/options?${params.toString()}`
+    );
+  },
 
   listWatches: () => request<{ watches: Watch[] }>("/api/watches"),
   createWatch: (payload: {

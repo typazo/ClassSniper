@@ -19,8 +19,13 @@ from app.providers.base import CourseRecord, FetchResult, RosterRecord, SectionR
 from app.providers.cornell import parse_cornell_classes_payload
 from app.services.cs_requirements import (
     CSRequirementsIndex,
+    decode_completed_courses,
+    evaluate_prereq_node,
+    expand_satisfied_courses,
     extract_prereq_codes,
     match_qualifying_prereq_text,
+    normalize_completed_courses,
+    parse_prereq_ast,
     strip_recommended_clauses,
 )
 from app.services.gate import PRIORITY_POLLER, PRIORITY_SEARCH, PRIORITY_WARMUP, CornellRequestGate
@@ -516,3 +521,301 @@ async def test_cs_requirements_filters_multi_select_and_sse_lazy_refresh(tmp_pat
                 await client.get("/api/courses/search", params={"roster": "SP27", "subjects": "ECON"})
             ).json()
             assert econ_res["courses"][0]["status_is_stale"] is False
+
+
+def test_prereq_ast_boolean_and_edge_cases() -> None:
+    # 1) CS 4300: Recommended clause ignored
+    mode, node = parse_prereq_ast("CS 2110. Recommended prerequisite: CS 3300.")
+    assert mode == "ast"
+    ev_cs2110 = evaluate_prereq_node(mode, node, {"CS 2110"})
+    assert ev_cs2110["prereq_status"] == "met"
+    assert ev_cs2110["prereqs_met"] is True
+    assert ev_cs2110["satisfied_by"] == ["CS 2110"]
+    ev_empty = evaluate_prereq_node(mode, node, set())
+    assert ev_empty["prereq_status"] == "unmet"
+    assert ev_empty["missing_prereqs"] == "CS 2110"
+
+    # 2) ORIE 4750: (ENGRD 2700 or BTRY 3080) AND CS 2110 (with static equivalents + crosslists)
+    mode2, node2 = parse_prereq_ast("ENGRD 2700 or BTRY 3080, CS 2110 or equivalent.")
+    assert mode2 == "ast"
+    sat_orie, _ = expand_satisfied_courses(
+        ["STSCI 3080", "ENGRD 2110"],
+        crosslists_by_code={"ENGRD 2110": ["CS 2110"], "CS 2110": ["ENGRD 2110"]},
+        include_implied=True,
+    )
+    assert evaluate_prereq_node(mode2, node2, sat_orie)["prereqs_met"] is True
+    # Also verify crosslists work even when include_implied=False
+    sat_cross_only, imp_off = expand_satisfied_courses(
+        ["STSCI 3080", "ENGRD 2110"],
+        crosslists_by_code={"ENGRD 2110": ["CS 2110"], "CS 2110": ["ENGRD 2110"]},
+        include_implied=False,
+    )
+    assert imp_off == []
+    assert evaluate_prereq_node(mode2, node2, sat_cross_only)["prereqs_met"] is True
+    missing_cs = evaluate_prereq_node(mode2, node2, {"ENGRD 2700"})
+    assert missing_cs["prereqs_met"] is False
+    assert missing_cs["missing_prereqs"] == "CS 2110"
+
+    # 3) ORIE 5126: OR chain across comma-or + implied CS 1110 from CS 2110
+    mode3, node3 = parse_prereq_ast("CS 1110, CS 1112, OR INFO 2950.")
+    assert mode3 == "ast"
+    assert evaluate_prereq_node(mode3, node3, {"INFO 2950"})["prereqs_met"] is True
+    sat_with_implied, implied = expand_satisfied_courses(["CS 2110"], include_implied=True)
+    assert "CS 1110" in implied
+    assert evaluate_prereq_node(mode3, node3, sat_with_implied)["prereqs_met"] is True
+    sat_no_implied, implied_off = expand_satisfied_courses(["CS 2110"], include_implied=False)
+    assert implied_off == []
+    assert evaluate_prereq_node(mode3, node3, sat_no_implied)["prereqs_met"] is False
+
+    # 4) CS 4152 multi-track: 'for programmers: CS 3110 or CS 2110; Prerequisites for designers: CS 1110'
+    mode4, node4 = parse_prereq_ast(
+        "Prerequisite for programmers: CS 3110 or CS 2110; Prerequisites for designers: CS 1110."
+    )
+    assert mode4 == "ast"
+    assert evaluate_prereq_node(mode4, node4, {"CS 1110"})["prereqs_met"] is True
+
+    # 5) BEE 4550 threshold: AtLeast(2)
+    mode5, node5 = parse_prereq_ast("At least two of: CS 1110, CS 2110, ENGRD 2700.")
+    assert mode5 == "ast"
+    assert evaluate_prereq_node(mode5, node5, {"CS 1110", "ENGRD 2700"})["prereqs_met"] is True
+    ev_one = evaluate_prereq_node(mode5, node5, {"CS 1110"})
+    assert ev_one["prereqs_met"] is False
+    assert "any 1 of" in ev_one["missing_prereqs"]
+
+    # 6) AND/OR normalization (mixed and upper case)
+    for raw in ("CS 2110 and/or CS 2800.", "CS 2110 AND / OR CS 2800."):
+        m_andor, n_andor = parse_prereq_ast(raw)
+        assert m_andor == "ast"
+        assert evaluate_prereq_node(m_andor, n_andor, {"CS 2800"})["prereqs_met"] is True
+        assert evaluate_prereq_node(m_andor, n_andor, {"CS 2110"})["prereqs_met"] is True
+
+    # 7) Corequisites ignored in CSRequirementsIndex.evaluate_course_prereqs
+    idx = CSRequirementsIndex(
+        [
+            {
+                "subject": "CS",
+                "catalog_nbr": "4120",
+                "catalog_num": 4120,
+                "catalog_prereq": "CS 3110.",
+                "catalog_coreq": "CS 4121.",
+                "crosslists": [],
+                "units_min": 4.0,
+                "units_max": 4.0,
+                "has_letter_grade": True,
+                "components": ["LEC"],
+            }
+        ]
+    )
+    coreq_eval = idx.evaluate_course_prereqs("CS", "4120", {"CS 3110"})
+    assert coreq_eval["prereq_status"] == "met"
+    assert coreq_eval["prereqs_met"] is True
+
+    # 8) Prose-only requirement classified cleanly
+    mode_p, node_p = parse_prereq_ast("Two semesters of college-level biology.")
+    assert mode_p == "prose" and node_p is None
+    ev_p = evaluate_prereq_node(mode_p, node_p, {"CS 2110", "CS 3110"})
+    assert ev_p["prereq_status"] == "prose"
+    assert ev_p["prereqs_met"] is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_users_db_migration(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy_users.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                priority_tier INTEGER NOT NULL DEFAULT 1,
+                discord_user_id TEXT NOT NULL DEFAULT '',
+                discord_ping_enabled INTEGER NOT NULL DEFAULT 1,
+                personal_webhook_url TEXT NOT NULL DEFAULT '',
+                web_push_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        await conn.execute(
+            "INSERT INTO users (username, password_hash, role, priority_tier) VALUES (?, ?, 'admin', 2)",
+            ("legacy_admin", "hash123"),
+        )
+        await conn.commit()
+
+    db = Database(db_path)
+    await db.connect()
+    try:
+        cols = await db.fetch_all("PRAGMA table_info(users)")
+        col_names = {c["name"] for c in cols}
+        assert {"completed_courses_json", "include_implied_prereqs", "show_cs_features"} <= col_names
+        row = await db.fetch_one(
+            "SELECT completed_courses_json, include_implied_prereqs, show_cs_features FROM users WHERE username = 'legacy_admin'"
+        )
+        assert row is not None
+        assert decode_completed_courses(row["completed_courses_json"]) == []
+        assert row["include_implied_prereqs"] == 1
+        assert row["show_cs_features"] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_per_user_prereqs_isolation_and_search_filtering(tmp_path: Path) -> None:
+    settings = Settings(
+        app_domain="sniper.hodgman.net",
+        app_origin="https://sniper.hodgman.net",
+        data_dir=tmp_path / "data",
+        static_dir=tmp_path / "static",
+        enable_background_workers=False,
+    )
+    settings.ensure_persisted_secrets()
+    provider = RichCSFakeProvider()
+    # Add an extra course with both a prereq AND a concurrent coreq to prove coreq does not block
+    provider.courses_by_bucket[("SP27", "ORIE")].append(
+        _make_course(
+            "ORIE",
+            "4130",
+            "Simulation Modeling",
+            3.0,
+            3.0,
+            "OPT",
+            prereq="CS 2110.",
+            coreq="ORIE 3510.",
+            class_nbr=3004,
+            acad_group="EN",
+        )
+    )
+    app = create_app(custom_settings=settings, custom_provider=provider)
+
+    async with app.router.lifespan_context(app):
+        await app.state.catalog.sync_rosters_and_subjects("SP27")
+        await app.state.catalog.sync_full_roster("SP27", delay_sec=0.0)
+
+        transport = httpx.ASGITransport(app=app)
+        async with (
+            httpx.AsyncClient(transport=transport, base_url="https://sniper.hodgman.net") as client_a,
+            httpx.AsyncClient(transport=transport, base_url="https://sniper.hodgman.net") as client_b,
+        ):
+            boot = await client_a.post("/api/auth/bootstrap", json={"username": "alice", "password": "password123"})
+            assert boot.status_code == 201
+            assert boot.json()["user"]["completed_courses"] == []
+            assert boot.json()["user"]["include_implied_prereqs"] is True
+            assert boot.json()["user"]["show_cs_features"] is True
+
+            # User A creates an invite and User B registers on a separate client session
+            inv = (await client_a.post("/api/admin/invites", json={"max_uses": 1, "expires_hours": 24, "note": "bob"})).json()
+            reg = await client_b.post(
+                "/api/auth/register",
+                json={"invite_code": inv["invite"]["code"], "username": "bob", "password": "password123"},
+            )
+            assert reg.status_code == 201
+            assert reg.json()["user"]["show_cs_features"] is True
+
+            # User B hides CS-major-specific UI features; User A stays enabled
+            pref_b = await client_b.put("/api/auth/preferences", json={"show_cs_features": False})
+            assert pref_b.status_code == 200
+            assert pref_b.json()["user"]["show_cs_features"] is False
+            assert (await client_b.get("/api/auth/me")).json()["user"]["show_cs_features"] is False
+            assert (await client_a.get("/api/auth/me")).json()["user"]["show_cs_features"] is True
+
+            # User A sets prereqs (with lowercase/no-space code to verify normalization)
+            put_a = await client_a.put(
+                "/api/user/prereqs?roster=SP27",
+                json={"completed_courses": ["cs2110", "MATH 1920", "cs 2110"], "include_implied_prereqs": True},
+            )
+            assert put_a.status_code == 200
+            data_a = put_a.json()
+            assert data_a["completed_courses"] == ["CS 2110", "MATH 1920"]
+            assert data_a["include_implied_prereqs"] is True
+            assert {"CS 1110", "MATH 1910"} <= set(data_a["implied_courses"])
+
+            # /api/auth/me reflects persisted prereqs for User A
+            me_a = (await client_a.get("/api/auth/me")).json()["user"]
+            assert me_a["completed_courses"] == ["CS 2110", "MATH 1920"]
+            assert me_a["include_implied_prereqs"] is True
+
+            # User B remains completely isolated with empty prereqs
+            me_b = (await client_b.get("/api/auth/me")).json()["user"]
+            assert me_b["completed_courses"] == []
+            get_b = (await client_b.get("/api/user/prereqs?roster=SP27")).json()
+            assert get_b["completed_courses"] == []
+            assert get_b["implied_courses"] == []
+
+            # User B saves different prereqs and disables implied foundations
+            put_b = await client_b.put(
+                "/api/user/prereqs?roster=SP27",
+                json={"completed_courses": ["CS 3410"], "include_implied_prereqs": False},
+            )
+            assert put_b.status_code == 200
+            assert put_b.json() == {
+                "completed_courses": ["CS 3410"],
+                "include_implied_prereqs": False,
+                "implied_courses": [],
+            }
+            # User A still intact
+            assert (await client_a.get("/api/user/prereqs?roster=SP27")).json()["completed_courses"] == [
+                "CS 2110",
+                "MATH 1920",
+            ]
+
+            # Search Technical Electives with only_eligible=true for User A
+            te_elig = (
+                await client_a.get(
+                    "/api/courses/search",
+                    params={"roster": "SP27", "cs_requirement": "tech_elective", "only_eligible": "true", "limit": 200},
+                )
+            ).json()
+            elig_by_code = {f"{c['subject']} {c['catalog_nbr']}": c for c in te_elig["courses"]}
+            assert te_elig["meta"]["total_matched"] == len(te_elig["courses"])
+
+            # Met via CS 2110 / MATH 1920 / implied CS 1110 / no prereqs / non-blocking coreq ORIE 3510
+            assert "CS 4300" in elig_by_code
+            assert elig_by_code["CS 4300"]["cs_eligibility"]["prereq_status"] == "met"
+            assert "MATH 2940" in elig_by_code  # MATH 1920 prereq met!
+            assert "MATH 3110" in elig_by_code  # MATH 1920 or 2220 met!
+            assert "CS 2770" in elig_by_code    # CS 1110 implied via CS 2110!
+            assert "ORIE 4130" in elig_by_code  # CS 2110 met; concurrent coreq ORIE 3510 ignored!
+            assert "CS 4999" in elig_by_code and elig_by_code["CS 4999"]["cs_eligibility"]["prereq_status"] == "none"
+
+            # Validation rejects malformed course codes with 422
+            bad_put = await client_a.put(
+                "/api/user/prereqs",
+                json={"completed_courses": ["NOT_A_COURSE"]},
+            )
+            assert bad_put.status_code == 422
+
+            # Unmet or prose-only TEs filtered out cleanly
+            for excluded in ("CS 3700", "CS 3780", "CS 4782", "ORIE 3300", "ORIE 3310", "BIOMG 3300", "ECON 3130"):
+                assert excluded not in elig_by_code
+
+            # Verify User A sees missing_prereqs metadata when only_eligible=false
+            te_all_a = (
+                await client_a.get(
+                    "/api/courses/search",
+                    params={"roster": "SP27", "cs_requirement": "tech_elective", "only_eligible": "false", "limit": 200},
+                )
+            ).json()["courses"]
+            all_a_by_code = {f"{c['subject']} {c['catalog_nbr']}": c for c in te_all_a}
+            assert all_a_by_code["CS 3700"]["cs_eligibility"]["prereq_status"] == "unmet"
+            assert all_a_by_code["CS 3700"]["cs_eligibility"]["missing_prereqs"] == "CS 2800"
+            assert all_a_by_code["BIOMG 3300"]["cs_eligibility"]["prereq_status"] == "prose"
+
+            # Verify All Courses mode with only_eligible=true returns only prereqs_met courses for User B
+            all_elig_b = (
+                await client_b.get(
+                    "/api/courses/search",
+                    params={"roster": "SP27", "cs_requirement": "", "only_eligible": "true", "limit": 200},
+                )
+            ).json()
+            b_codes = {f"{c['subject']} {c['catalog_nbr']}" for c in all_elig_b["courses"]}
+            assert all_elig_b["meta"]["total_matched"] == len(all_elig_b["courses"])
+            assert "CS 4410" in b_codes   # prereq CS 3410 met by Bob
+            assert "CS 3110" not in b_codes  # needs CS 2110 (Bob doesn't have it)
+            assert "CS 4300" not in b_codes
+
+            # Local prereq options autocomplete works cleanly
+            opts = (await client_a.get("/api/user/prereqs/options", params={"roster": "SP27", "q": "211"})).json()
+            assert any(o["code"] == "CS 2110" for o in opts["options"])
+

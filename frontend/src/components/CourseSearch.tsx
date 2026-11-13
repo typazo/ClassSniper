@@ -3,11 +3,15 @@ import {
   AlertTriangle,
   BellPlus,
   BookMarked,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  EyeOff,
   GraduationCap,
+  ListChecks,
   Loader2,
+  Lock,
   Search,
 } from "lucide-react";
 import { api } from "../api/client";
@@ -25,6 +29,7 @@ import type {
   Subject,
   User,
 } from "../types";
+import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
 import { CourseInsightsPanel } from "./CourseInsightsPanel";
 import { MultiSubjectSelect } from "./MultiSubjectSelect";
 import { StatusBadge } from "./StatusBadge";
@@ -81,6 +86,7 @@ function formatBadgeTone(badge: CourseCSBadge): string {
 interface Props {
   user: User;
   lastCatalogRefresh?: CatalogSubjectRefreshedSSE | null;
+  onUserUpdated?: (user: User) => void;
   onWatchCreated: () => void;
 }
 
@@ -104,10 +110,12 @@ interface SearchOverride {
   include2000TE?: boolean;
   includeResearchTE?: boolean;
   curriculum?: CSCurriculumMode;
+  onlyEligible?: boolean;
+  showCsFeatures?: boolean;
   silent?: boolean;
 }
 
-export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props) {
+export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchCreated }: Props) {
   const [rosters, setRosters] = useState<Roster[]>([]);
   const [selectedRoster, setSelectedRoster] = useState("");
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -115,11 +123,14 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
   const [query, setQuery] = useState("");
 
   // CS Major Requirement Filters
+  const [showCsFeatures, setShowCsFeatures] = useState<boolean>(user.show_cs_features ?? true);
   const [csRequirement, setCsRequirement] = useState<CSRequirementMode>("");
   const [levelMin, setLevelMin] = useState<number | null>(null);
   const [curriculum, setCurriculum] = useState<CSCurriculumMode>("current");
   const [include2000TE, setInclude2000TE] = useState(true);
   const [includeResearchTE, setIncludeResearchTE] = useState(true);
+  const [onlyEligible, setOnlyEligible] = useState(false);
+  const [prereqsModalOpen, setPrereqsModalOpen] = useState(false);
 
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [searchMeta, setSearchMeta] = useState<SearchCoursesMeta | null>(null);
@@ -139,6 +150,13 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
   const uncachedRequestedRef = useRef<Set<string>>(new Set());
   const hasSearchedRef = useRef(false);
   const lastProcessedRefreshRef = useRef<CatalogSubjectRefreshedSSE | null>(null);
+
+  useEffect(() => {
+    setShowCsFeatures(user.show_cs_features ?? true);
+    if (user.show_cs_features === false) {
+      setCsRequirement("");
+    }
+  }, [user.show_cs_features]);
 
   useEffect(() => {
     api
@@ -190,16 +208,22 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
       if (!r) return;
       const q = override?.query ?? query;
       const subjs = override?.subjects ?? selectedSubjects;
-      const req = override?.csRequirement ?? csRequirement;
+      const csEnabled = override?.showCsFeatures ?? showCsFeatures;
+      const req = csEnabled ? (override?.csRequirement ?? csRequirement) : "";
       const lvl = override?.levelMin !== undefined ? override.levelMin : levelMin;
       const inc2000 = override?.include2000TE ?? include2000TE;
       const incRes = override?.includeResearchTE ?? includeResearchTE;
       const curr = override?.curriculum ?? curriculum;
+      const eligibleOnly = override?.onlyEligible ?? onlyEligible;
       const silent = Boolean(override?.silent);
 
-      if (!q.trim() && subjs.length === 0 && !req && !lvl) {
+      if (!q.trim() && subjs.length === 0 && !req && !lvl && !eligibleOnly) {
         if (!silent) {
-          setError("Enter a course code, keyword, class #, pick subjects, or select a CS requirement filter.");
+          setError(
+            csEnabled
+              ? "Enter a course code, keyword, class #, pick subjects, or select a CS requirement filter."
+              : "Enter a course code, keyword, class #, or pick one or more subjects."
+          );
         }
         return;
       }
@@ -218,6 +242,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
           include_2000_te: inc2000,
           include_research_te: incRes,
           curriculum: curr,
+          only_eligible: eligibleOnly,
           refresh_stale: true,
           limit: req ? 150 : 100,
         });
@@ -247,7 +272,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
             pendingMissing.add(s.toUpperCase());
           }
         }
-        if (req === "tech_elective" && subjs.length === 0 && (res.meta?.stem_synced ?? 0) < (res.meta?.stem_total ?? 0)) {
+        if (csEnabled && req === "tech_elective" && subjs.length === 0 && (res.meta?.stem_synced ?? 0) < (res.meta?.stem_total ?? 0)) {
           pendingMissing.add("__STEM_WARMUP__");
         }
         uncachedRequestedRef.current = pendingMissing;
@@ -261,7 +286,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
         }
       }
     },
-    [selectedRoster, query, selectedSubjects, csRequirement, levelMin, include2000TE, includeResearchTE, curriculum, loadInsights]
+    [selectedRoster, query, selectedSubjects, showCsFeatures, csRequirement, levelMin, include2000TE, includeResearchTE, curriculum, onlyEligible, loadInsights]
   );
 
   // Live SSE handler: flip "Loading live status..." -> Open/Waitlist/Closed smoothly in real time
@@ -379,13 +404,51 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
 
     setSelectedSubjects(nextSubjs);
     setLevelMin(nextLevel);
-    if (nextMode !== "" || query.trim() || nextSubjs.length > 0) {
+    if (nextMode !== "" || query.trim() || nextSubjs.length > 0 || onlyEligible) {
       void executeSearch({
         csRequirement: nextMode,
         subjects: nextSubjs,
         levelMin: nextLevel,
       });
     }
+  }
+
+  function handleToggleCsFeatures(nextShow: boolean) {
+    setError("");
+    setShowCsFeatures(nextShow);
+    onUserUpdated?.({ ...user, show_cs_features: nextShow });
+
+    if (!nextShow) {
+      const wasCsMode = csRequirement !== "";
+      const nextLevel = csRequirement === "external_spec" && levelMin === 3000 ? null : levelMin;
+      if (wasCsMode) {
+        setCsRequirement("");
+        if (nextLevel !== levelMin) setLevelMin(nextLevel);
+        if (query.trim() || selectedSubjects.length > 0 || nextLevel || onlyEligible) {
+          void executeSearch({
+            showCsFeatures: false,
+            csRequirement: "",
+            subjects: selectedSubjects,
+            levelMin: nextLevel,
+          });
+        } else {
+          setCourses([]);
+          setSearchMeta(null);
+          hasSearchedRef.current = false;
+        }
+      }
+    }
+
+    api
+      .updateUserPreferences({ show_cs_features: nextShow })
+      .then((res) => {
+        onUserUpdated?.(res.user);
+      })
+      .catch((err) => {
+        setShowCsFeatures(!nextShow);
+        onUserUpdated?.({ ...user, show_cs_features: !nextShow });
+        setError(err instanceof Error ? err.message : "Failed to save preference");
+      });
   }
 
   function toggleCourse(course: CourseSummary) {
@@ -475,41 +538,71 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
   return (
     <div className="space-y-4">
       <form onSubmit={runSearchForm} className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
-        {/* CS Major Requirement Segmented Bar */}
+        {/* CS Major Requirement Segmented Bar + Toggle */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-              <GraduationCap className="h-3.5 w-3.5 text-emerald-400" />
-              CS Major:
-            </span>
-            {CS_REQUIREMENT_MODES.map((m) => {
-              const active = csRequirement === m.id;
-              return (
-                <button
-                  key={m.id || "all"}
-                  type="button"
-                  title={m.hint}
-                  onClick={() => handleModeSelect(m.id)}
-                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${
-                    active
-                      ? "bg-emerald-500 text-zinc-950 shadow-sm"
-                      : "border border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-emerald-500/40 hover:text-white"
-                  }`}
-                >
-                  {m.label}
-                </button>
-              );
-            })}
-          </div>
+          {showCsFeatures ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                <GraduationCap className="h-3.5 w-3.5 text-emerald-400" />
+                CS Major:
+              </span>
+              {CS_REQUIREMENT_MODES.map((m) => {
+                const active = csRequirement === m.id;
+                return (
+                  <button
+                    key={m.id || "all"}
+                    type="button"
+                    title={m.hint}
+                    onClick={() => handleModeSelect(m.id)}
+                    className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${
+                      active
+                        ? "bg-emerald-500 text-zinc-950 shadow-sm"
+                        : "border border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-emerald-500/40 hover:text-white"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-xs font-medium text-zinc-300">Search Cornell Classes</div>
+          )}
 
-          {totalSubjectsCount > 0 && (
-            <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+          <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-zinc-400">
+            {totalSubjectsCount > 0 && (
               <span>
                 Cached: <strong className="text-zinc-200">{syncedSubjectsCount}</strong>/{totalSubjectsCount} subj
-                {stemTotalCount > 0 && ` (STEM ${stemSyncedCount}/${stemTotalCount})`}
+                {showCsFeatures && stemTotalCount > 0 && ` (STEM ${stemSyncedCount}/${stemTotalCount})`}
               </span>
-            </div>
-          )}
+            )}
+            <button
+              type="button"
+              onClick={() => handleToggleCsFeatures(!showCsFeatures)}
+              title={
+                showCsFeatures
+                  ? "Hide CS Electives, Technical Electives, External Spec filters, and CS degree badges"
+                  : "Show CS Major requirement filters and degree badges"
+              }
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                showCsFeatures
+                  ? "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-zinc-500 hover:text-white"
+                  : "border-zinc-700/80 bg-zinc-950 text-zinc-400 hover:border-emerald-500/40 hover:text-emerald-300"
+              }`}
+            >
+              {showCsFeatures ? (
+                <>
+                  <EyeOff className="h-3 w-3 text-zinc-400" />
+                  Hide CS Major
+                </>
+              ) : (
+                <>
+                  <GraduationCap className="h-3 w-3 text-emerald-400" />
+                  Show CS Major
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Main Search Grid */}
@@ -605,7 +698,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
               </select>
             </div>
 
-            {csRequirement === "cs_elective" && (
+            {showCsFeatures && csRequirement === "cs_elective" && (
               <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-0.5">
                 <button
                   type="button"
@@ -638,7 +731,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
               </div>
             )}
 
-            {csRequirement === "tech_elective" && (
+            {showCsFeatures && csRequirement === "tech_elective" && (
               <div className="flex flex-wrap items-center gap-3">
                 <label className="inline-flex cursor-pointer items-center gap-1.5 text-zinc-300">
                   <input
@@ -668,28 +761,72 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
                 </label>
               </div>
             )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPrereqsModalOpen(true)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  (user.completed_courses?.length ?? 0) > 0
+                    ? "border-sky-500/40 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25"
+                    : "border-zinc-700 bg-zinc-950 text-zinc-300 hover:border-emerald-500/40 hover:text-white"
+                }`}
+              >
+                <ListChecks className="h-3.5 w-3.5 text-emerald-400" />
+                My Prereqs ({user.completed_courses?.length ?? 0})
+              </button>
+
+              <label
+                className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  onlyEligible
+                    ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-200"
+                    : "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-zinc-600"
+                }`}
+                title={
+                  (user.completed_courses?.length ?? 0) === 0
+                    ? "Add your completed courses via My Prereqs to check eligibility"
+                    : "Only show classes whose required prerequisites you have satisfied"
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={onlyEligible}
+                  onChange={(e) => {
+                    const nextVal = e.target.checked;
+                    setOnlyEligible(nextVal);
+                    if (nextVal || csRequirement || selectedSubjects.length > 0 || query.trim() || levelMin) {
+                      void executeSearch({ onlyEligible: nextVal });
+                    }
+                  }}
+                  className="accent-emerald-500"
+                />
+                <span>Only prereqs met</span>
+              </label>
+            </div>
           </div>
 
-          <div className="text-[11px] text-zinc-500">
-            Official rules:{" "}
-            <a
-              href="https://catalog.cornell.edu/programs/computer-science-bs/"
-              target="_blank"
-              rel="noreferrer"
-              className="text-emerald-400/90 hover:underline"
-            >
-              B.S.
-            </a>{" "}
-            /{" "}
-            <a
-              href="https://catalog.cornell.edu/programs/computer-science-ba/"
-              target="_blank"
-              rel="noreferrer"
-              className="text-emerald-400/90 hover:underline"
-            >
-              B.A.
-            </a>
-          </div>
+          {showCsFeatures && (
+            <div className="text-[11px] text-zinc-500">
+              Official rules:{" "}
+              <a
+                href="https://catalog.cornell.edu/programs/computer-science-bs/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-emerald-400/90 hover:underline"
+              >
+                B.S.
+              </a>{" "}
+              /{" "}
+              <a
+                href="https://catalog.cornell.edu/programs/computer-science-ba/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-emerald-400/90 hover:underline"
+              >
+                B.A.
+              </a>
+            </div>
+          )}
         </div>
       </form>
 
@@ -701,6 +838,21 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
       {error && (
         <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
           {error}
+        </div>
+      )}
+
+      {onlyEligible && (user.completed_courses?.length ?? 0) === 0 && courses.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-xs text-sky-200">
+          <span>
+            No completed courses saved yet — showing only classes with no explicit required prerequisites.
+          </span>
+          <button
+            type="button"
+            onClick={() => setPrereqsModalOpen(true)}
+            className="rounded-lg border border-sky-400/40 bg-sky-500/20 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-500/30"
+          >
+            Select My Prereqs
+          </button>
         </div>
       )}
 
@@ -768,8 +920,9 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
           const elig = course.cs_eligibility;
           const creditsLabel = formatCredits(course.units_min, course.units_max);
           const collegeMeta = [course.acad_career, course.acad_group].filter(Boolean).join(" · ");
-          const activeWarning =
-            csRequirement === "cs_elective"
+          const activeWarning = !showCsFeatures
+            ? ""
+            : csRequirement === "cs_elective"
               ? elig?.cs_elective_warning
               : csRequirement === "tech_elective"
                 ? elig?.tech_elective_warning
@@ -832,23 +985,48 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
                         </>
                       )}
 
-                      {elig?.badges.map((badge, idx) => (
-                        <span
-                          key={`${badge.kind}-${idx}`}
-                          className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${formatBadgeTone(
-                            badge
-                          )}`}
-                        >
-                          {badge.tone === "amber" && <AlertTriangle className="h-2.5 w-2.5" />}
-                          {badge.label}
+                      {showCsFeatures &&
+                        elig?.badges.map((badge, idx) => (
+                          <span
+                            key={`${badge.kind}-${idx}`}
+                            className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${formatBadgeTone(
+                              badge
+                            )}`}
+                          >
+                            {badge.tone === "amber" && <AlertTriangle className="h-2.5 w-2.5" />}
+                            {badge.label}
+                          </span>
+                        ))}
+
+                      {elig?.prereq_status === "met" && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <CheckCircle2 className="h-2.5 w-2.5" />
+                          Prereqs Met
                         </span>
-                      ))}
+                      )}
+                      {elig?.prereq_status === "none" && (
+                        <span className="rounded-md border border-zinc-700/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
+                          No Prereqs
+                        </span>
+                      )}
+                      {elig?.prereq_status === "unmet" && elig.missing_prereqs && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/35 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-300">
+                          <Lock className="h-2.5 w-2.5" />
+                          Missing: {elig.missing_prereqs}
+                        </span>
+                      )}
+                      {elig?.prereq_status === "prose" && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          Check catalog text prereq
+                        </span>
+                      )}
                     </div>
 
                     <p className="text-sm text-zinc-200">{course.title_long}</p>
 
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
-                      {elig?.tech_elective_reason && (csRequirement === "tech_elective" || csRequirement === "") && (
+                      {showCsFeatures && elig?.tech_elective_reason && (csRequirement === "tech_elective" || csRequirement === "") && (
                         <span className="text-sky-300/90">{elig.tech_elective_reason}</span>
                       )}
                       {activeWarning && (
@@ -879,23 +1057,53 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
                   {course.description && <p className="text-xs leading-relaxed text-zinc-400">{course.description}</p>}
 
                   {/* Prerequisites / Corequisites / Overlaps Box */}
-                  {(course.catalog_prereq || course.catalog_coreq || course.catalog_forbidden_overlaps || elig) && (
+                  {(course.catalog_prereq ||
+                    course.catalog_coreq ||
+                    course.catalog_forbidden_overlaps ||
+                    showCsFeatures ||
+                    (elig?.prereq_status && elig.prereq_status !== "none")) && (
                     <div className="space-y-1.5 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-zinc-300">
                         <span className="inline-flex items-center gap-1.5">
                           <BookMarked className="h-3.5 w-3.5 text-emerald-400" />
-                          Prerequisites &amp; Degree Check
+                          {showCsFeatures ? "Prerequisites & Degree Check" : "Prerequisites"}
                         </span>
-                        <a
-                          href="https://catalog.cornell.edu/programs/computer-science-bs/"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 font-normal text-emerald-400 hover:underline"
-                        >
-                          Cornell CS Catalog
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
+                        {showCsFeatures && (
+                          <a
+                            href="https://catalog.cornell.edu/programs/computer-science-bs/"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 font-normal text-emerald-400 hover:underline"
+                          >
+                            Cornell CS Catalog
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </div>
+                      {elig?.prereq_status === "met" && elig.satisfied_by && elig.satisfied_by.length > 0 && (
+                        <div className="text-emerald-300">
+                          <span className="font-medium">Prereq check: </span>
+                          Satisfied by {elig.satisfied_by.join(", ")}
+                        </div>
+                      )}
+                      {elig?.prereq_status === "none" && (
+                        <div className="text-zinc-400">
+                          <span className="font-medium">Prereq check: </span>
+                          No explicit course prerequisites listed.
+                        </div>
+                      )}
+                      {elig?.prereq_status === "unmet" && elig.missing_prereqs && (
+                        <div className="text-rose-300">
+                          <span className="font-medium">Prereq check: </span>
+                          Missing {elig.missing_prereqs}
+                        </div>
+                      )}
+                      {elig?.prereq_status === "prose" && (
+                        <div className="text-amber-200">
+                          <span className="font-medium">Prereq check: </span>
+                          Text-only prerequisite — verify manually against the catalog description below.
+                        </div>
+                      )}
                       {course.catalog_prereq && (
                         <div className="text-zinc-300">
                           <span className="font-medium text-zinc-400">Prerequisites: </span>
@@ -914,7 +1122,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
                           {course.catalog_forbidden_overlaps}
                         </div>
                       )}
-                      {course.acad_group && course.acad_group !== "AS" && (
+                      {showCsFeatures && course.acad_group && course.acad_group !== "AS" && (
                         <div className="text-[11px] text-zinc-500">
                           College code <span className="text-zinc-300">{course.acad_group}</span> (B.A. A&amp;S students: non-A&amp;S course cap applies). Always confirm degree audit with your CS advisor.
                         </div>
@@ -1122,6 +1330,24 @@ export function CourseSearch({ user, lastCatalogRefresh, onWatchCreated }: Props
           </form>
         </div>
       )}
+      <CompletedPrereqsModal
+        isOpen={prereqsModalOpen}
+        roster={selectedRoster}
+        initialCompleted={user.completed_courses || []}
+        initialIncludeImplied={user.include_implied_prereqs ?? true}
+        showCsFeatures={showCsFeatures}
+        onClose={() => setPrereqsModalOpen(false)}
+        onSaved={(res) => {
+          onUserUpdated?.({
+            ...user,
+            completed_courses: res.completed_courses,
+            include_implied_prereqs: res.include_implied_prereqs,
+          });
+          if (hasSearchedRef.current || csRequirement || query.trim() || selectedSubjects.length > 0 || onlyEligible) {
+            void executeSearch({ silent: true });
+          }
+        }}
+      />
     </div>
   );
 }

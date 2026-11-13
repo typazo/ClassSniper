@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.services.cs_requirements import normalize_completed_courses, normalize_course_code
 from app.services.notifiers import is_valid_discord_user_id, is_valid_discord_webhook_url
 
 
@@ -129,3 +130,21 @@ class SyncCatalogRequest(BaseModel):
 class RefreshSubjectsRequest(BaseModel):
     roster: str = Field(min_length=3, max_length=10)
     subjects: list[str] = Field(min_length=1, max_length=20)
+
+
+class CompletedPrereqsRequest(BaseModel):
+    completed_courses: list[str] = Field(default_factory=list, max_length=200)
+    include_implied_prereqs: Optional[bool] = None
+
+    @field_validator("completed_courses")
+    @classmethod
+    def check_completed_courses(cls, v: list[str]) -> list[str]:
+        cleaned = [raw.strip() for raw in v if raw and raw.strip()]
+        invalid = [raw for raw in cleaned if normalize_course_code(raw) is None]
+        if invalid:
+            raise ValueError(f"Invalid course code(s): {', '.join(invalid[:5])}")
+        return normalize_completed_courses(cleaned)
+
+
+class UserPreferencesRequest(BaseModel):
+    show_cs_features: bool

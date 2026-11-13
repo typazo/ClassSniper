@@ -9,7 +9,7 @@ from typing import Any, Literal, Optional
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.api.schemas import RefreshSubjectsRequest, SyncCatalogRequest
+from app.api.schemas import CompletedPrereqsRequest, RefreshSubjectsRequest, SyncCatalogRequest
 from app.auth import get_current_user, get_db
 from app.db import Database
 from app.services.catalog import CatalogSyncService
@@ -92,9 +92,11 @@ async def search_courses(
     include_2000_te: bool = Query(default=True),
     include_research_te: bool = Query(default=True),
     curriculum: Literal["current", "pre2024"] = Query(default="current"),
+    only_eligible: bool = Query(default=False),
+    include_implied_prereqs: Optional[bool] = Query(default=None),
     refresh_stale: bool = Query(default=True),
     limit: int = Query(default=100, ge=1, le=300),
-    _: dict[str, Any] = Depends(get_current_user),
+    user: dict[str, Any] = Depends(get_current_user),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
     parsed_subjects = [s.strip().upper() for s in subjects.split(",") if s.strip()]
@@ -102,6 +104,13 @@ async def search_courses(
         single = subject.strip().upper()
         if single not in parsed_subjects:
             parsed_subjects.insert(0, single)
+
+    completed_courses = list(user.get("completed_courses") or [])
+    effective_implied = (
+        bool(user.get("include_implied_prereqs", True))
+        if include_implied_prereqs is None
+        else bool(include_implied_prereqs)
+    )
 
     result = await catalog.search_courses_advanced(
         roster=roster,
@@ -113,6 +122,9 @@ async def search_courses(
         include_2000_te=include_2000_te,
         include_research_te=include_research_te,
         curriculum=curriculum,
+        completed_courses=completed_courses,
+        only_eligible=only_eligible,
+        include_implied_prereqs=effective_implied,
         refresh_stale=refresh_stale,
         limit=limit,
     )
@@ -230,3 +242,81 @@ async def sync_catalog(
 
     asyncio.create_task(catalog.sync_full_roster(target_roster), name=f"sync-{target_roster}")
     return {"status": "started", "roster": target_roster}
+
+
+async def _build_user_prereqs_payload(
+    catalog: CatalogSyncService,
+    roster: Optional[str],
+    completed_courses: list[str],
+    include_implied_prereqs: bool,
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    cs_index = await catalog.get_cs_requirements_index(target_roster)
+    _, implied_courses = cs_index.expand_satisfied_courses(
+        completed_courses,
+        include_implied=include_implied_prereqs,
+    )
+    return {
+        "completed_courses": completed_courses,
+        "include_implied_prereqs": include_implied_prereqs,
+        "implied_courses": implied_courses,
+    }
+
+
+@router.get("/user/prereqs")
+async def get_user_prereqs(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    user: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    return await _build_user_prereqs_payload(
+        catalog=catalog,
+        roster=roster,
+        completed_courses=list(user.get("completed_courses") or []),
+        include_implied_prereqs=bool(user.get("include_implied_prereqs", True)),
+    )
+
+
+@router.put("/user/prereqs")
+async def update_user_prereqs(
+    body: CompletedPrereqsRequest,
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    completed = list(body.completed_courses)
+    include_implied = (
+        bool(user.get("include_implied_prereqs", True))
+        if body.include_implied_prereqs is None
+        else bool(body.include_implied_prereqs)
+    )
+    async with db.write_tx() as conn:
+        await conn.execute(
+            """
+            UPDATE users
+            SET completed_courses_json = ?,
+                include_implied_prereqs = ?
+            WHERE id = ?
+            """,
+            (json.dumps(completed), 1 if include_implied else 0, user["id"]),
+        )
+    return await _build_user_prereqs_payload(
+        catalog=catalog,
+        roster=roster,
+        completed_courses=completed,
+        include_implied_prereqs=include_implied,
+    )
+
+
+@router.get("/user/prereqs/options")
+async def get_user_prereq_options(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    q: str = Query(default="", max_length=100),
+    limit: int = Query(default=30, ge=1, le=100),
+    _: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    options = await catalog.get_prereq_course_options(target_roster, query=q, limit=limit)
+    return {"roster": target_roster, "options": options}

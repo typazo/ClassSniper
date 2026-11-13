@@ -18,12 +18,25 @@ from app.auth import (
 )
 from app.config import Settings, get_settings
 from app.db import Database
-from app.api.schemas import BootstrapRequest, LoginRequest, RegisterInviteRequest
+from app.api.schemas import (
+    BootstrapRequest,
+    LoginRequest,
+    RegisterInviteRequest,
+    UserPreferencesRequest,
+)
+from app.services.cs_requirements import decode_completed_courses
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
+    completed = (
+        list(user["completed_courses"])
+        if isinstance(user.get("completed_courses"), list)
+        else decode_completed_courses(user.get("completed_courses_json"))
+    )
+    raw_implied = user.get("include_implied_prereqs")
+    raw_show_cs = user.get("show_cs_features")
     return {
         "id": user["id"],
         "username": user["username"],
@@ -33,6 +46,9 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "discord_ping_enabled": bool(user.get("discord_ping_enabled", 1)),
         "web_push_enabled": bool(user.get("web_push_enabled", 1)),
         "has_personal_webhook": bool((user.get("personal_webhook_url") or "").strip()),
+        "completed_courses": completed,
+        "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
+        "show_cs_features": True if raw_show_cs is None else bool(raw_show_cs),
     }
 
 
@@ -53,7 +69,8 @@ async def auth_status(
             row = await db.fetch_one(
                 """
                 SELECT id, username, role, priority_tier, discord_user_id,
-                       discord_ping_enabled, personal_webhook_url, web_push_enabled
+                       discord_ping_enabled, personal_webhook_url, web_push_enabled,
+                       completed_courses_json, include_implied_prereqs, show_cs_features
                 FROM users
                 WHERE id = ?
                 """,
@@ -97,16 +114,14 @@ async def bootstrap_admin(
 
     set_session_cookie(response, user_id, settings)
     return {
-        "user": {
-            "id": user_id,
-            "username": body.username.strip(),
-            "role": "admin",
-            "priority_tier": 2,
-            "discord_user_id": "",
-            "discord_ping_enabled": True,
-            "web_push_enabled": True,
-            "has_personal_webhook": False,
-        }
+        "user": _serialize_user(
+            {
+                "id": user_id,
+                "username": body.username.strip(),
+                "role": "admin",
+                "priority_tier": 2,
+            }
+        )
     }
 
 
@@ -120,7 +135,8 @@ async def login(
     user = await db.fetch_one(
         """
         SELECT id, username, password_hash, role, priority_tier, discord_user_id,
-               discord_ping_enabled, personal_webhook_url, web_push_enabled
+               discord_ping_enabled, personal_webhook_url, web_push_enabled,
+               completed_courses_json, include_implied_prereqs, show_cs_features
         FROM users
         WHERE username = ?
         """,
@@ -180,16 +196,14 @@ async def register_with_invite(
 
     set_session_cookie(response, user_id, settings)
     return {
-        "user": {
-            "id": user_id,
-            "username": username,
-            "role": "user",
-            "priority_tier": 1,
-            "discord_user_id": "",
-            "discord_ping_enabled": True,
-            "web_push_enabled": True,
-            "has_personal_webhook": False,
-        }
+        "user": _serialize_user(
+            {
+                "id": user_id,
+                "username": username,
+                "role": "user",
+                "priority_tier": 1,
+            }
+        )
     }
 
 
@@ -205,3 +219,18 @@ async def logout(
 @router.get("/me")
 async def me(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     return {"user": _serialize_user(user)}
+
+
+@router.put("/preferences")
+async def update_user_preferences(
+    body: UserPreferencesRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+) -> dict[str, Any]:
+    next_val = bool(body.show_cs_features)
+    async with db.write_tx() as conn:
+        await conn.execute(
+            "UPDATE users SET show_cs_features = ? WHERE id = ?",
+            (1 if next_val else 0, user["id"]),
+        )
+    return {"user": _serialize_user({**user, "show_cs_features": next_val})}

@@ -763,6 +763,9 @@ class CatalogSyncService:
         include_2000_te: bool = True,
         include_research_te: bool = True,
         curriculum: str = "current",
+        completed_courses: Optional[list[str]] = None,
+        only_eligible: bool = False,
+        include_implied_prereqs: bool = True,
         refresh_stale: bool = True,
         limit: int = 100,
     ) -> dict[str, Any]:
@@ -832,7 +835,7 @@ class CatalogSyncService:
             effective_level_min = 3000
 
         fts_expr = build_fts_query(query_clean)
-        sql_limit = 4500 if req_mode else max(limit, 200)
+        sql_limit = 4500 if (req_mode or only_eligible) else max(limit, 200)
 
         where_extra: list[str] = []
         extra_params: list[Any] = []
@@ -920,6 +923,10 @@ class CatalogSyncService:
                         break
 
         cs_index = await self.get_cs_requirements_index(roster_u)
+        satisfied_set, implied_courses = cs_index.expand_satisfied_courses(
+            completed_courses or [],
+            include_implied=include_implied_prereqs,
+        )
 
         if req_mode:
             courses = [
@@ -932,6 +939,22 @@ class CatalogSyncService:
                     include_research_te=include_research_te,
                     curriculum=curriculum_mode,
                 )
+            ]
+
+        prereq_by_course: dict[tuple[str, str], dict[str, Any]] = {
+            (c["subject"].upper(), str(c["catalog_nbr"]).upper()): cs_index.evaluate_course_prereqs(
+                c["subject"],
+                c["catalog_nbr"],
+                satisfied_set,
+            )
+            for c in courses
+        }
+
+        if only_eligible:
+            courses = [
+                c
+                for c in courses
+                if prereq_by_course[(c["subject"].upper(), str(c["catalog_nbr"]).upper())]["prereqs_met"]
             ]
 
         courses = self._sort_courses(
@@ -998,7 +1021,15 @@ class CatalogSyncService:
             c["has_letter_grade"] = bool(c.get("has_letter_grade", 1))
             c["sections"] = sec_by_course.get((su, nbr), [])
             c["external_links"] = build_external_links(c["roster"], su, nbr)
-            c["cs_eligibility"] = cs_index.get(su, nbr).to_dict()
+            prereq_eval = prereq_by_course.get((su, str(nbr).upper())) or cs_index.evaluate_course_prereqs(
+                su,
+                nbr,
+                satisfied_set,
+            )
+            c["cs_eligibility"] = {
+                **cs_index.get(su, nbr).to_dict(),
+                **prereq_eval,
+            }
             c["subject_synced_at"] = eff_iso
             c["status_is_stale"] = not is_fresh
 
@@ -1025,8 +1056,110 @@ class CatalogSyncService:
                 "stem_total": coverage["stem_total"],
                 "refreshing_subjects": coverage["refreshing_subjects"],
                 "warmup_active": coverage["warmup_active"],
+                "implied_courses": implied_courses,
             },
         }
+
+    async def get_prereq_course_options(
+        self,
+        roster: str,
+        query: str = "",
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Query local cached courses_meta for prerequisite autocomplete with zero Cornell API calls."""
+        roster_u = roster.upper()
+        query_clean = normalize_search_query(query)
+        rows: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        def _append_rows(batch: list[dict[str, Any]]) -> None:
+            for row in batch:
+                key = (row["subject"].upper(), str(row["catalog_nbr"]).upper())
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    rows.append(
+                        {
+                            "code": f"{key[0]} {key[1]}",
+                            "subject": key[0],
+                            "catalog_nbr": key[1],
+                            "title": row.get("title_long") or row.get("title_short") or "",
+                            "crosslists": _decode_json_list(row.get("crosslists_json", "[]")),
+                        }
+                    )
+                    if len(rows) >= limit:
+                        return
+
+        if not query_clean:
+            default_rows = await self.db.fetch_all(
+                """
+                SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                FROM courses_meta
+                WHERE roster = ?
+                  AND subject IN ('CS', 'MATH', 'ORIE', 'ECE', 'INFO', 'STSCI', 'ENGRD', 'BTRY')
+                  AND catalog_num BETWEEN 1000 AND 4999
+                ORDER BY subject, catalog_num, catalog_nbr
+                LIMIT ?
+                """,
+                (roster_u, limit),
+            )
+            _append_rows(default_rows)
+            if len(rows) < limit:
+                fallback_rows = await self.db.fetch_all(
+                    """
+                    SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                    FROM courses_meta
+                    WHERE roster = ?
+                      AND catalog_num BETWEEN 1000 AND 4999
+                    ORDER BY subject, catalog_num, catalog_nbr
+                    LIMIT ?
+                    """,
+                    (roster_u, limit),
+                )
+                _append_rows(fallback_rows)
+            return rows[:limit]
+
+        fts_expr = build_fts_query(query_clean)
+        if fts_expr:
+            fts_rows = await self.db.fetch_all(
+                """
+                SELECT cm.subject, cm.catalog_nbr, cm.title_short, cm.title_long, cm.crosslists_json
+                FROM courses_fts
+                JOIN courses_meta cm
+                  ON cm.roster = courses_fts.roster
+                 AND cm.subject = courses_fts.subject
+                 AND cm.catalog_nbr = courses_fts.catalog_nbr
+                WHERE courses_fts MATCH ?
+                  AND courses_fts.roster = ?
+                ORDER BY rank, cm.subject, cm.catalog_num, cm.catalog_nbr
+                LIMIT ?
+                """,
+                (fts_expr, roster_u, limit),
+            )
+            _append_rows(fts_rows)
+
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", query_clean)]
+        if tokens and len(rows) < limit:
+            clauses = ["roster = ?"]
+            params: list[Any] = [roster_u]
+            for tok in tokens[:5]:
+                clauses.append(
+                    "LOWER(subject || ' ' || catalog_nbr || ' ' || COALESCE(title_long, title_short, '')) LIKE ? ESCAPE '\\'"
+                )
+                params.append(f"%{_escape_like(tok)}%")
+            params.append(limit)
+            like_rows = await self.db.fetch_all(
+                f"""
+                SELECT subject, catalog_nbr, title_short, title_long, crosslists_json
+                FROM courses_meta
+                WHERE {' AND '.join(clauses)}
+                ORDER BY subject, catalog_num, catalog_nbr
+                LIMIT ?
+                """,
+                params,
+            )
+            _append_rows(like_rows)
+
+        return rows[:limit]
 
     async def search_courses(
         self,

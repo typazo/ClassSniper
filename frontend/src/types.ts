@@ -7,6 +7,9 @@ export interface User {
   discord_ping_enabled: boolean;
   web_push_enabled: boolean;
   has_personal_webhook: boolean;
+  completed_courses: string[];
+  include_implied_prereqs: boolean;
+  show_cs_features: boolean;
 }
 
 export interface AuthStatus {
@@ -72,6 +75,10 @@ export interface CourseCSEligibility {
   external_spec: boolean;
   external_spec_warning: string;
   badges: CourseCSBadge[];
+  prereq_status?: "none" | "met" | "unmet" | "prose";
+  prereqs_met?: boolean;
+  satisfied_by?: string[];
+  missing_prereqs?: string;
 }
 
 export interface CourseSummary {
@@ -110,6 +117,21 @@ export interface SearchCoursesMeta {
   stem_total: number;
   refreshing_subjects: string[];
   warmup_active: boolean;
+  implied_courses?: string[];
+}
+
+export interface PrereqCourseOption {
+  code: string;
+  subject: string;
+  catalog_nbr: string;
+  title: string;
+  crosslists: string[];
+}
+
+export interface UserPrereqsResponse {
+  completed_courses: string[];
+  include_implied_prereqs: boolean;
+  implied_courses: string[];
 }
 
 export interface CatalogStatus {

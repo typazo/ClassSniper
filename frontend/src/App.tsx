@@ -265,6 +265,9 @@ export default function App() {
           <CourseSearch
             user={user}
             lastCatalogRefresh={lastCatalogRefresh}
+            onUserUpdated={(updatedUser) => {
+              setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
+            }}
             onWatchCreated={() => {
               refreshWatches();
               setTab("watches");

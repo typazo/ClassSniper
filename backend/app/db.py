@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS users (
     discord_ping_enabled INTEGER NOT NULL DEFAULT 1,
     personal_webhook_url TEXT,
     web_push_enabled INTEGER NOT NULL DEFAULT 1,
+    completed_courses_json TEXT NOT NULL DEFAULT '[]',
+    include_implied_prereqs INTEGER NOT NULL DEFAULT 1,
+    show_cs_features INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -216,6 +219,13 @@ def build_fts_query(raw_query: str) -> str:
     return " AND ".join(f'"{tok}"*' for tok in tokens)
 
 
+_USERS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("completed_courses_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("include_implied_prereqs", "INTEGER NOT NULL DEFAULT 1"),
+    ("show_cs_features", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
 _COURSES_META_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("acad_career", "TEXT NOT NULL DEFAULT ''"),
     ("acad_group", "TEXT NOT NULL DEFAULT ''"),
@@ -245,8 +255,17 @@ class Database:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
+        await self._migrate_users()
         await self._migrate_courses_meta()
         await self._conn.commit()
+
+    async def _migrate_users(self) -> None:
+        """Add per-user preference columns idempotently on existing SQLite databases."""
+        cursor = await self.conn.execute("PRAGMA table_info(users)")
+        existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
+        for col_name, col_def in _USERS_MIGRATIONS:
+            if col_name not in existing_cols:
+                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}")
 
     async def _migrate_courses_meta(self) -> None:
         """Add CS-elective metadata columns idempotently on existing SQLite databases."""

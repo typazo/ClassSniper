@@ -7,10 +7,13 @@ import type {
   ScheduleSection,
 } from "../types";
 import {
+  extractSectionSlots,
   formatMinutesFull,
   formatMinutesShort,
   getCourseColor,
+  sectionOverlapsSlots,
   type ScheduleDiagnostics,
+  type TimeSlot,
 } from "../utils/schedulerSolver";
 
 const WEEKDAY_LABELS: Array<{ code: DayCode; short: string; full: string }> = [
@@ -121,10 +124,25 @@ interface Props {
     section: ScheduleSection;
     conflicts: boolean;
   } | null;
+  swapFocus?: {
+    courseItemId: number;
+    classNbr: number;
+  } | null;
   readOnly?: boolean;
   onClickCourseSection?: (courseItemId: number, classNbr: number) => void;
+  onSelectAlternativeSection?: (courseItemId: number, oldClassNbr: number, newClassNbr: number) => void;
+  onClearSwapFocus?: () => void;
   onDeleteBlock?: (blockId: number) => void;
   onCreateBlock?: (payload: { days: DayCode[]; startMin: number; endMin: number }) => void;
+}
+
+interface SwapAlternativeGhost {
+  section: ScheduleSection;
+  day: DayCode;
+  startMin: number;
+  endMin: number;
+  conflicts: boolean;
+  room: string;
 }
 
 const HOUR_HEIGHT_PX = 54;
@@ -134,8 +152,11 @@ export function WeeklyCalendarGrid({
   blocks,
   diagnostics,
   hoverPreview,
+  swapFocus,
   readOnly = false,
   onClickCourseSection,
+  onSelectAlternativeSection,
+  onClearSwapFocus,
   onDeleteBlock,
   onCreateBlock,
 }: Props) {
@@ -153,6 +174,8 @@ export function WeeklyCalendarGrid({
     endHour,
     eventsByDay,
     tbaSections,
+    swapInfo,
+    swapGhostsByDay,
   } = useMemo(() => {
     const activeCourses = courses.filter((c) => c.enabled);
     const activeBlocks = blocks.filter((b) => b.enabled);
@@ -273,14 +296,103 @@ export function WeeklyCalendarGrid({
       map.set(d.code, layoutDayEvents(dayRaw));
     }
 
+    // F4: Click-a-block ghost alternative preview
+    let resolvedSwapInfo: {
+      course: ScheduleCourseItem;
+      targetSection: ScheduleSection;
+      altCount: number;
+    } | null = null;
+    const ghostsByDay = new Map<DayCode, SwapAlternativeGhost[]>();
+    if (!readOnly && swapFocus) {
+      const targetCourse = activeCourses.find((c) => c.id === swapFocus.courseItemId);
+      let targetEgIdx: number | null = null;
+      let targetSec: ScheduleSection | null = null;
+      if (targetCourse) {
+        for (const eg of targetCourse.enroll_groups) {
+          const found = eg.sections.find((s) => s.class_nbr === swapFocus.classNbr);
+          if (found) {
+            targetEgIdx = eg.enroll_group_idx;
+            targetSec = found;
+            break;
+          }
+        }
+      }
+      if (targetCourse && targetSec && targetEgIdx !== null) {
+        const occupiedOther: TimeSlot[] = [];
+        for (const b of activeBlocks) {
+          for (const day of b.days) {
+            occupiedOther.push({
+              day,
+              start_min: b.start_min,
+              end_min: b.end_min,
+              courseLabel: b.label,
+            });
+          }
+        }
+        for (const c of activeCourses) {
+          const chosen = new Set(c.selected_class_nbrs);
+          for (const eg of c.enroll_groups) {
+            for (const s of eg.sections) {
+              if (!chosen.has(s.class_nbr)) continue;
+              if (c.id === targetCourse.id && s.class_nbr === targetSec.class_nbr) continue;
+              for (const sl of extractSectionSlots(
+                `${c.subject} ${c.catalog_nbr}`,
+                s
+              )) {
+                occupiedOther.push(sl);
+              }
+            }
+          }
+        }
+
+        const egObj = targetCourse.enroll_groups.find(
+          (eg) => eg.enroll_group_idx === targetEgIdx
+        );
+        const alternatives = (egObj?.sections || []).filter(
+          (s) =>
+            s.ssr_component === targetSec!.ssr_component &&
+            s.class_nbr !== targetSec!.class_nbr
+        );
+        for (const alt of alternatives) {
+          const conflicts = sectionOverlapsSlots(alt, occupiedOther);
+          for (const mtg of alt.meetings) {
+            minM = Math.min(minM, mtg.start_min);
+            maxM = Math.max(maxM, mtg.end_min);
+            for (const day of mtg.days) {
+              const arr = ghostsByDay.get(day) || [];
+              arr.push({
+                section: alt,
+                day,
+                startMin: mtg.start_min,
+                endMin: mtg.end_min,
+                conflicts,
+                room: mtg.facility_descr || alt.instruction_mode || "",
+              });
+              ghostsByDay.set(day, arr);
+            }
+          }
+        }
+        resolvedSwapInfo = {
+          course: targetCourse,
+          targetSection: targetSec,
+          altCount: alternatives.length,
+        };
+      }
+    }
+
+    const finalStartHour = Math.max(7, Math.floor(minM / 60));
+    const finalEndHour = Math.min(23, Math.ceil(maxM / 60));
+
     return {
       visibleDays: daysList,
-      startHour: sHour,
-      endHour: Math.max(sHour + 4, eHour),
+      startHour: Math.min(sHour, finalStartHour),
+      endHour: Math.max(sHour + 4, eHour, finalEndHour),
       eventsByDay: map,
       tbaSections: tba,
+      swapInfo: resolvedSwapInfo,
+      swapGhostsByDay: ghostsByDay,
     };
-  }, [courses, blocks, diagnostics, hoverPreview]);
+  }, [courses, blocks, diagnostics, hoverPreview, swapFocus, readOnly]);
 
   const hours = useMemo(() => {
     const arr: number[] = [];
@@ -332,6 +444,33 @@ export function WeeklyCalendarGrid({
 
   return (
     <div className="space-y-3">
+      {swapInfo && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+          <span>
+            Swapping{" "}
+            <strong>
+              {swapInfo.course.subject} {swapInfo.course.catalog_nbr}{" "}
+              {swapInfo.targetSection.ssr_component} {swapInfo.targetSection.section}
+            </strong>{" "}
+            —{" "}
+            {swapInfo.altCount > 0
+              ? `click any dashed block below to switch (${swapInfo.altCount} alternative${
+                  swapInfo.altCount === 1 ? "" : "s"
+                })`
+              : "no other section options in this enrollment group"}
+          </span>
+          {onClearSwapFocus && (
+            <button
+              type="button"
+              onClick={onClearSwapFocus}
+              className="rounded-lg border border-emerald-500/40 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
+            >
+              Done
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Mobile Day Filter Pills */}
       <div className="flex items-center justify-between gap-2 sm:hidden">
         <div className="flex flex-wrap gap-1">
@@ -547,7 +686,11 @@ export function WeeklyCalendarGrid({
                         className={`absolute z-10 flex flex-col justify-between overflow-hidden rounded-lg border px-1.5 py-1 transition-all ${
                           ev.isConflict
                             ? "border-rose-400 bg-rose-500/25 text-rose-50 ring-1 ring-rose-400/60"
-                            : `${style.border} ${style.bg} ${style.text}`
+                            : swapFocus &&
+                                swapFocus.courseItemId === ev.courseItemId &&
+                                swapFocus.classNbr === ev.classNbr
+                              ? `${style.border} ${style.bg} ${style.text} ring-2 ring-white/80`
+                              : `${style.border} ${style.bg} ${style.text}`
                         } ${onClickCourseSection ? "cursor-pointer hover:brightness-110" : ""}`}
                       >
                         <div className="min-w-0">
@@ -622,6 +765,58 @@ export function WeeklyCalendarGrid({
                             {hoverPreview.conflicts ? "Conflicts with schedule" : "Preview · fits cleanly"}
                           </div>
                         </div>
+                      );
+                    })}
+
+                  {/* Click-Block Ghost Swap Alternatives Layer */}
+                  {swapInfo &&
+                    (swapGhostsByDay.get(d.code) || []).map((g, gIdx) => {
+                      const topPct = ((g.startMin - gridStartMin) / totalMinutes) * 100;
+                      const heightPct = Math.max(
+                        3.2,
+                        ((g.endMin - g.startMin) / totalMinutes) * 100
+                      );
+                      return (
+                        <button
+                          key={`swap-ghost-${g.section.class_nbr}-${gIdx}`}
+                          type="button"
+                          data-grid-event="true"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectAlternativeSection?.(
+                              swapInfo.course.id,
+                              swapInfo.targetSection.class_nbr,
+                              g.section.class_nbr
+                            );
+                          }}
+                          title={`Click to switch to ${g.section.ssr_component} ${g.section.section} #${g.section.class_nbr} (${formatMinutesShort(g.startMin)}–${formatMinutesShort(g.endMin)})`}
+                          style={{
+                            top: `${topPct}%`,
+                            height: `${heightPct}%`,
+                            left: "4px",
+                            width: "calc(100% - 8px)",
+                          }}
+                          className={`absolute z-30 flex flex-col justify-between overflow-hidden rounded-lg border-2 border-dashed px-1.5 py-1 text-left shadow-lg backdrop-blur-sm transition hover:scale-[1.01] ${
+                            g.conflicts
+                              ? "border-rose-400/80 bg-rose-950/75 text-rose-100 hover:bg-rose-900/80"
+                              : "border-emerald-300 bg-emerald-950/80 text-emerald-50 hover:bg-emerald-900/90"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="truncate text-[10px] font-bold">
+                              {g.section.ssr_component} {g.section.section} #{g.section.class_nbr}
+                            </span>
+                            <span
+                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(
+                                g.section.open_status
+                              )}`}
+                            />
+                          </div>
+                          <div className="truncate text-[9px] opacity-90">
+                            {formatMinutesShort(g.startMin)}–{formatMinutesShort(g.endMin)}
+                            {g.conflicts ? " · Conflict" : " · Click to swap"}
+                          </div>
+                        </button>
                       );
                     })}
                 </div>

@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Crosshair,
+  GraduationCap,
   LogOut,
   Search,
   Settings,
@@ -17,6 +18,7 @@ import { api } from "./api/client";
 import { AdminPanel } from "./components/AdminPanel";
 import { AuthScreen } from "./components/AuthScreen";
 import { CourseSearch } from "./components/CourseSearch";
+import { CsChecklistPage } from "./components/CsChecklistPage";
 import { NotificationSetup } from "./components/NotificationSetup";
 import { SchedulerPage } from "./components/SchedulerPage";
 import { SharedScheduleView } from "./components/SharedScheduleView";
@@ -25,6 +27,7 @@ import { WatchList } from "./components/WatchList";
 import type {
   AuthStatus,
   CatalogSubjectRefreshedSSE,
+  CourseSearchPreset,
   MetricsResponse,
   PollerMetrics,
   SeatAlertSSE,
@@ -32,7 +35,7 @@ import type {
 } from "./types";
 import { copyText, playAlertChime } from "./utils/pwa";
 
-type Tab = "watches" | "search" | "scheduler" | "alerts" | "telemetry" | "admin";
+type Tab = "watches" | "search" | "checklist" | "scheduler" | "alerts" | "telemetry" | "admin";
 
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -45,6 +48,8 @@ export default function App() {
   const [bannerAlert, setBannerAlert] = useState<SeatAlertSSE | null>(null);
   const [bannerCopied, setBannerCopied] = useState(false);
   const [lastCatalogRefresh, setLastCatalogRefresh] = useState<CatalogSubjectRefreshedSSE | null>(null);
+  const [searchPreset, setSearchPreset] = useState<CourseSearchPreset | null>(null);
+  const [checklistRoster, setChecklistRoster] = useState<string>("");
 
   const urlParams = new URLSearchParams(window.location.search);
   const initialInvite = urlParams.get("invite") || "";
@@ -115,6 +120,10 @@ export default function App() {
       } catch {
         // ignore
       }
+    });
+
+    es.addEventListener("watches_changed", () => {
+      refreshWatches();
     });
 
     return () => {
@@ -222,6 +231,9 @@ export default function App() {
         <div className="mx-auto hidden max-w-5xl gap-1 px-4 pb-2 sm:flex">
           <NavBtn active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label={`Watchlist (${watches.length})`} />
           <NavBtn active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search Classes" />
+          {user.major_mode === "cs" && (
+            <NavBtn active={tab === "checklist"} onClick={() => setTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="CS Checklist" />
+          )}
           <NavBtn active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Scheduler" />
           <NavBtn active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts & Push" />
           <NavBtn
@@ -301,6 +313,12 @@ export default function App() {
           <CourseSearch
             user={user}
             lastCatalogRefresh={lastCatalogRefresh}
+            searchPreset={searchPreset}
+            onClearSearchPreset={() => setSearchPreset(null)}
+            onOpenChecklist={(roster) => {
+              if (roster) setChecklistRoster(roster);
+              setTab("checklist");
+            }}
             onUserUpdated={(updatedUser) => {
               setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
             }}
@@ -309,6 +327,19 @@ export default function App() {
               setTab("watches");
             }}
             onJumpToScheduler={() => setTab("scheduler")}
+          />
+        )}
+        {tab === "checklist" && user.major_mode === "cs" && (
+          <CsChecklistPage
+            user={user}
+            initialRoster={checklistRoster}
+            onUserUpdated={(updatedUser) => {
+              setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
+            }}
+            onLaunchSearch={(preset) => {
+              setSearchPreset(preset);
+              setTab("search");
+            }}
           />
         )}
         {tab === "scheduler" && (
@@ -330,6 +361,9 @@ export default function App() {
       <nav className="fixed inset-x-0 bottom-0 z-30 flex border-t border-zinc-800 bg-zinc-950/95 pb-safe backdrop-blur-md sm:hidden">
         <MobileTab active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label="Watches" />
         <MobileTab active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search" />
+        {user.major_mode === "cs" && (
+          <MobileTab active={tab === "checklist"} onClick={() => setTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="Checklist" />
+        )}
         <MobileTab active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Schedule" />
         <MobileTab active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts" />
         <MobileTab

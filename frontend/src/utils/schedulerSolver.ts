@@ -1,5 +1,8 @@
 import type {
+  CourseSection,
+  CourseSummary,
   DayCode,
+  HydratedSchedule,
   ScheduleBlock,
   ScheduleCourseItem,
   ScheduleSection,
@@ -836,4 +839,162 @@ export function solveSchedules(
 
 export function getSectionMeetingCount(meetings: SectionMeeting[]): number {
   return meetings.reduce((acc, m) => acc + m.days.length, 0);
+}
+
+export interface SimpleSlot {
+  day: DayCode;
+  startMin: number;
+  endMin: number;
+}
+
+function parseClockMinutes(raw: string): number | null {
+  const m = raw.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return null;
+  let hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const mer = m[3].toUpperCase();
+  if (mer === "AM" && hh === 12) hh = 0;
+  else if (mer === "PM" && hh !== 12) hh += 12;
+  return hh * 60 + mm;
+}
+
+function parsePatternDays(pattern: string): DayCode[] {
+  const days: DayCode[] = [];
+  let i = 0;
+  const p = pattern.trim();
+  while (i < p.length) {
+    const two = p.slice(i, i + 2);
+    if (two === "Sa" || two === "Su") {
+      days.push(two);
+      i += 2;
+      continue;
+    }
+    const ch = p[i];
+    if (ch === "M" || ch === "T" || ch === "W" || ch === "R" || ch === "F") {
+      days.push(ch);
+    }
+    i += 1;
+  }
+  return days;
+}
+
+export function parseMeetingsSummaryToSlots(summary: string): SimpleSlot[] {
+  if (!summary || summary.trim().toUpperCase() === "TBA") return [];
+  const slots: SimpleSlot[] = [];
+  for (const part of summary.split(";")) {
+    const m = part
+      .trim()
+      .match(/^([MTWRFSau]+)\s+(\d{1,2}:\d{2}\s*(?:AM|PM))-(\d{1,2}:\d{2}\s*(?:AM|PM))/i);
+    if (!m) continue;
+    const days = parsePatternDays(m[1]);
+    const startMin = parseClockMinutes(m[2]);
+    const endMin = parseClockMinutes(m[3]);
+    if (startMin === null || endMin === null || endMin <= startMin) continue;
+    for (const day of days) {
+      slots.push({ day, startMin, endMin });
+    }
+  }
+  return slots;
+}
+
+function simpleSlotsOverlap(a: SimpleSlot, b: SimpleSlot): boolean {
+  return a.day === b.day && a.startMin < b.endMin && b.startMin < a.endMin;
+}
+
+export function buildScheduleOccupiedIntervals(
+  schedule: HydratedSchedule | null | undefined,
+  excludeCourseKey?: string
+): SimpleSlot[] {
+  if (!schedule) return [];
+  const occupied: SimpleSlot[] = [];
+  for (const blk of schedule.blocks) {
+    if (!blk.enabled) continue;
+    for (const day of blk.days) {
+      occupied.push({ day, startMin: blk.start_min, endMin: blk.end_min });
+    }
+  }
+  for (const c of schedule.courses) {
+    if (!c.enabled) continue;
+    const key = `${c.subject.toUpperCase()} ${c.catalog_nbr.toUpperCase()}`;
+    if (excludeCourseKey && key === excludeCourseKey) continue;
+    const chosenSet = new Set(c.selected_class_nbrs);
+    for (const eg of c.enroll_groups) {
+      for (const sec of eg.sections) {
+        if (!chosenSet.has(sec.class_nbr)) continue;
+        for (const mtg of sec.meetings) {
+          if (mtg.end_min <= mtg.start_min) continue;
+          for (const day of mtg.days) {
+            occupied.push({ day, startMin: mtg.start_min, endMin: mtg.end_min });
+          }
+        }
+      }
+    }
+  }
+  return occupied;
+}
+
+export function evaluateCourseFitsSchedule(
+  course: CourseSummary,
+  schedule: HydratedSchedule | null | undefined
+): { fits: boolean; compatibleClassNbrs: Set<number> } {
+  const compatibleClassNbrs = new Set<number>();
+  if (!schedule) return { fits: true, compatibleClassNbrs };
+  const courseKey = `${course.subject.toUpperCase()} ${course.catalog_nbr.toUpperCase()}`;
+  const occupied = buildScheduleOccupiedIntervals(schedule, courseKey);
+
+  // Check each enroll group separately
+  const byGroup = new Map<number, CourseSection[]>();
+  for (const s of course.sections) {
+    const arr = byGroup.get(s.enroll_group_idx) || [];
+    arr.push(s);
+    byGroup.set(s.enroll_group_idx, arr);
+  }
+
+  let anyGroupFits = false;
+  for (const secs of byGroup.values()) {
+    const reqComps =
+      secs[0]?.components_required && secs[0].components_required.length > 0
+        ? secs[0].components_required
+        : Array.from(new Set(secs.map((s) => s.ssr_component)));
+
+    const secNonConflict: CourseSection[] = [];
+    for (const sec of secs) {
+      const secSlots = parseMeetingsSummaryToSlots(sec.meetings_summary);
+      const hitsBusy = secSlots.some((ns) => occupied.some((os) => simpleSlotsOverlap(ns, os)));
+      if (!hitsBusy) {
+        secNonConflict.push(sec);
+      }
+    }
+
+    // Group non-conflicting sections by component and see if every required comp has >=1 option
+    const byComp = new Map<string, CourseSection[]>();
+    for (const s of secNonConflict) {
+      const list = byComp.get(s.ssr_component) || [];
+      list.push(s);
+      byComp.set(s.ssr_component, list);
+    }
+
+    const compArrays = reqComps.map((c) => byComp.get(c) || []);
+    if (compArrays.some((a) => a.length === 0)) continue;
+
+    // Quick backtracking check inside this enrollGroup so component selections don't conflict with each other
+    const canPickTuple = (idx: number, pickedSlots: SimpleSlot[]): boolean => {
+      if (idx === compArrays.length) return true;
+      for (const sec of compArrays[idx]) {
+        const sl = parseMeetingsSummaryToSlots(sec.meetings_summary);
+        if (sl.some((a) => pickedSlots.some((b) => simpleSlotsOverlap(a, b)))) continue;
+        if (canPickTuple(idx + 1, [...pickedSlots, ...sl])) return true;
+      }
+      return false;
+    };
+
+    if (canPickTuple(0, [])) {
+      anyGroupFits = true;
+      for (const s of secNonConflict) {
+        compatibleClassNbrs.add(s.class_nbr);
+      }
+    }
+  }
+
+  return { fits: anyGroupFits, compatibleClassNbrs };
 }

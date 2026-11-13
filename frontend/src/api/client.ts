@@ -1,11 +1,15 @@
 import type {
   AdminSettings,
   AdminUserItem,
+  AttributeOption,
+  AttrMatchMode,
   AuthStatus,
   CatalogStatus,
   CourseInsights,
   CourseSummary,
   CSCurriculumMode,
+  CsChecklistPayload,
+  CsChecklistSlotInput,
   CSRequirementMode,
   DayCode,
   HydratedSchedule,
@@ -23,6 +27,8 @@ import type {
   User,
   UserPrereqsResponse,
   Watch,
+  WatchHistoryResponse,
+  WatchHistoryWindow,
 } from "../types";
 
 class ApiError extends Error {
@@ -107,6 +113,8 @@ export const api = {
       ilr_match?: IlrMatchMode;
       ilr_multi_only?: boolean;
       include_ilr?: boolean;
+      attrs?: string[];
+      attr_match?: AttrMatchMode;
       only_eligible?: boolean;
       include_implied_prereqs?: boolean;
       ithaca_or_virtual?: boolean;
@@ -139,6 +147,10 @@ export const api = {
     if (options?.include_ilr !== undefined) {
       params.set("include_ilr", String(options.include_ilr));
     }
+    if (options?.attrs && options.attrs.length > 0) {
+      params.set("attrs", options.attrs.join(","));
+    }
+    if (options?.attr_match) params.set("attr_match", options.attr_match);
     if (options?.only_eligible !== undefined) {
       params.set("only_eligible", String(options.only_eligible));
     }
@@ -156,6 +168,32 @@ export const api = {
       `/api/courses/search?${params.toString()}`
     );
   },
+  getCourseAttributes: (roster: string) =>
+    request<{ roster: string; attributes: AttributeOption[] }>(
+      `/api/courses/attributes?roster=${encodeURIComponent(roster)}`
+    ),
+  getCsChecklist: (roster?: string) =>
+    request<CsChecklistPayload>(
+      `/api/cs/checklist${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`
+    ),
+  updateCsChecklist: (
+    payload: {
+      college: "arts" | "engineering";
+      curriculum: CSCurriculumMode;
+      include_active_schedule: boolean;
+      pe_completed: number;
+      slots: Record<string, CsChecklistSlotInput>;
+      sync_completed_courses?: string[];
+    },
+    roster?: string
+  ) =>
+    request<CsChecklistPayload>(
+      `/api/cs/checklist${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }
+    ),
   getCatalogStatus: (roster: string) =>
     request<CatalogStatus>(`/api/catalog/status?roster=${encodeURIComponent(roster)}`),
   getIlrSummary: (roster: string, ithacaOrVirtual = true, syncPriority = false) => {
@@ -219,6 +257,7 @@ export const api = {
     auto_pause: boolean;
     ithaca_or_virtual?: boolean;
     cooldown_sec: number;
+    group_key?: string;
   }) =>
     request<{ watch: Watch }>("/api/watches", {
       method: "POST",
@@ -226,12 +265,28 @@ export const api = {
     }),
   updateWatch: (
     id: number,
-    patch: Partial<{ active: boolean; auto_pause: boolean; trigger_on: "open" | "open_or_waitlist"; priority: number; cooldown_sec: number }>
+    patch: Partial<{
+      active: boolean;
+      auto_pause: boolean;
+      trigger_on: "open" | "open_or_waitlist";
+      priority: number;
+      cooldown_sec: number;
+      group_key: string;
+    }>
   ) =>
     request<{ watch: Watch }>(`/api/watches/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+  batchUpdateWatchGroup: (watchIds: number[], groupKey: string) =>
+    request<{ watches: Watch[]; group_key: string }>("/api/watches/group", {
+      method: "POST",
+      body: JSON.stringify({ watch_ids: watchIds, group_key: groupKey }),
+    }),
+  getWatchHistory: (watchId: number, window: WatchHistoryWindow = "7d", limit = 60) =>
+    request<WatchHistoryResponse>(
+      `/api/watches/${watchId}/history?window=${encodeURIComponent(window)}&limit=${limit}`
+    ),
   rearmWatch: (id: number) => request<{ watch: Watch }>(`/api/watches/${id}/rearm`, { method: "POST" }),
   checkWatchNow: (id: number) =>
     request<{ ok: boolean; rtt_ms: number; alerts_count: number }>(`/api/watches/${id}/check-now`, {
@@ -394,6 +449,11 @@ export const api = {
     request<HydratedSchedule>(`/api/schedules/${scheduleId}/blocks/${blockId}`, {
       method: "DELETE",
     }),
+  batchLoadScheduleInsights: (scheduleId: number, force = false) =>
+    request<HydratedSchedule & { insights_fetched_count?: number }>(
+      `/api/schedules/${scheduleId}/insights${force ? "?force=true" : ""}`,
+      { method: "POST" }
+    ),
   getSharedSchedule: (token: string) =>
     request<HydratedSchedule>(`/api/schedules/shared/${encodeURIComponent(token)}`),
 };

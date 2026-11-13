@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeftRight,
   BellPlus,
   Calendar,
   Check,
@@ -9,6 +10,7 @@ import {
   Edit3,
   Footprints,
   HelpCircle,
+  Image,
   Link2,
   Loader2,
   Plus,
@@ -16,6 +18,7 @@ import {
   Search,
   Share2,
   Sparkles,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -32,11 +35,13 @@ import type {
   User,
 } from "../types";
 import { downloadScheduleICS } from "../utils/icsExport";
+import { downloadSchedulePNG } from "../utils/pngExport";
 import {
   computeScheduleDiagnostics,
   type GeneratedScheduleCandidate,
 } from "../utils/schedulerSolver";
 import { ScheduleCourseSidebar } from "./ScheduleCourseSidebar";
+import { ScheduleDiffModal } from "./ScheduleDiffModal";
 import { ScheduleGeneratorPanel } from "./ScheduleGeneratorPanel";
 import { WeeklyCalendarGrid } from "./WeeklyCalendarGrid";
 
@@ -61,6 +66,12 @@ export function SchedulerPage({
   const [statusToast, setStatusToast] = useState<string | null>(null);
 
   const [expandedCourseId, setExpandedCourseId] = useState<number | null>(null);
+  const [swapFocus, setSwapFocus] = useState<{
+    courseItemId: number;
+    classNbr: number;
+  } | null>(null);
+  const [loadingBatchInsights, setLoadingBatchInsights] = useState(false);
+  const [showDiffModal, setShowDiffModal] = useState(false);
   const [hoverPreview, setHoverPreview] = useState<{
     course: ScheduleCourseItem;
     section: ScheduleSection;
@@ -393,6 +404,48 @@ export function SchedulerPage({
     }
   };
 
+  const handleSelectAlternativeSection = async (
+    courseItemId: number,
+    oldClassNbr: number,
+    newClassNbr: number
+  ) => {
+    if (!active) return;
+    const target = active.courses.find((c) => c.id === courseItemId);
+    if (!target) return;
+    const nextSelected = target.selected_class_nbrs.map((nbr) =>
+      nbr === oldClassNbr ? newClassNbr : nbr
+    );
+    const nextLocked = target.locked_class_nbrs.includes(oldClassNbr)
+      ? target.locked_class_nbrs.map((nbr) => (nbr === oldClassNbr ? newClassNbr : nbr))
+      : target.locked_class_nbrs;
+    setSwapFocus(null);
+    await handleUpdateCourse(courseItemId, {
+      selected_class_nbrs: nextSelected,
+      locked_class_nbrs: nextLocked,
+    });
+    showToast(`Swapped ${target.subject} ${target.catalog_nbr} to #${newClassNbr}`);
+  };
+
+  const handleLoadAllInsights = async () => {
+    if (!active || active.courses.length === 0) return;
+    setLoadingBatchInsights(true);
+    setErrorMsg(null);
+    try {
+      const res = await api.batchLoadScheduleInsights(active.schedule.id, false);
+      setActive(res);
+      const count = res.insights_fetched_count ?? 0;
+      showToast(
+        count > 0
+          ? `Loaded CU Reviews & RMP ratings for ${count} course${count === 1 ? "" : "s"}`
+          : "All schedule course ratings already up to date"
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load course ratings");
+    } finally {
+      setLoadingBatchInsights(false);
+    }
+  };
+
   const handleRemoveCourse = async (itemId: number) => {
     if (!active) return;
     try {
@@ -688,6 +741,47 @@ export function SchedulerPage({
 
             <button
               type="button"
+              disabled={!active || displayedCourses.length === 0 || loadingBatchInsights}
+              onClick={() => void handleLoadAllInsights()}
+              title="Fetch CU Reviews & RateMyProfessors ratings and workload for all courses in this schedule"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-sky-500/50 hover:text-sky-200 disabled:opacity-40"
+            >
+              {loadingBatchInsights ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+              ) : (
+                <Star className="h-3.5 w-3.5 text-amber-300" />
+              )}
+              {loadingBatchInsights ? "Loading Ratings..." : "Load Ratings"}
+            </button>
+
+            {schedules.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setShowDiffModal(true)}
+                title="Compare active schedule against another saved plan"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+              >
+                <ArrowLeftRight className="h-3.5 w-3.5 text-sky-300" />
+                Compare
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={!active || displayedCourses.length === 0}
+              onClick={() =>
+                active &&
+                downloadSchedulePNG(active, displayedCourses, active.blocks)
+              }
+              title="Export calendar grid as a crisp PNG image"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+            >
+              <Image className="h-3.5 w-3.5" />
+              PNG
+            </button>
+
+            <button
+              type="button"
               disabled={!active || displayedCourses.length === 0}
               onClick={() =>
                 active &&
@@ -696,7 +790,7 @@ export function SchedulerPage({
               className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
             >
               <Download className="h-3.5 w-3.5" />
-              Export .ics
+              .ics
             </button>
 
             <button
@@ -1042,9 +1136,19 @@ export function SchedulerPage({
             blocks={active?.blocks || []}
             diagnostics={diagnostics}
             hoverPreview={hoverPreview}
-            onClickCourseSection={(courseItemId) => {
+            swapFocus={swapFocus}
+            onClickCourseSection={(courseItemId, classNbr) => {
               setExpandedCourseId(courseItemId);
+              setSwapFocus((cur) =>
+                cur && cur.courseItemId === courseItemId && cur.classNbr === classNbr
+                  ? null
+                  : { courseItemId, classNbr }
+              );
             }}
+            onSelectAlternativeSection={(courseItemId, oldClassNbr, newClassNbr) =>
+              void handleSelectAlternativeSection(courseItemId, oldClassNbr, newClassNbr)
+            }
+            onClearSwapFocus={() => setSwapFocus(null)}
             onDeleteBlock={(blockId) => void handleDeleteBlock(blockId)}
             onCreateBlock={(blk) =>
               void handleCreateBlock({
@@ -1081,6 +1185,15 @@ export function SchedulerPage({
           />
         </div>
       </div>
+
+      {active && (
+        <ScheduleDiffModal
+          isOpen={showDiffModal}
+          active={active}
+          schedules={schedules}
+          onClose={() => setShowDiffModal(false)}
+        />
+      )}
     </div>
   );
 }

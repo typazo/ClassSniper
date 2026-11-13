@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -39,6 +39,7 @@ class CreateWatchRequest(BaseModel):
     auto_pause: bool = False
     ithaca_or_virtual: bool = False
     cooldown_sec: int = Field(default=60, ge=0, le=86400)
+    group_key: str = Field(default="", max_length=48)
 
 
 class UpdateWatchRequest(BaseModel):
@@ -47,6 +48,12 @@ class UpdateWatchRequest(BaseModel):
     trigger_on: Optional[Literal["open", "open_or_waitlist"]] = None
     priority: Optional[int] = Field(default=None, ge=1, le=2)
     cooldown_sec: Optional[int] = Field(default=None, ge=0, le=86400)
+    group_key: Optional[str] = Field(default=None, max_length=48)
+
+
+class BatchWatchGroupRequest(BaseModel):
+    watch_ids: list[int] = Field(min_length=1, max_length=50)
+    group_key: str = Field(default="", max_length=48)
 
 
 class PushSubscriptionKeys(BaseModel):
@@ -210,3 +217,23 @@ class UpdateScheduleBlockRequest(BaseModel):
     start_min: Optional[int] = Field(default=None, ge=0, le=1439)
     end_min: Optional[int] = Field(default=None, ge=1, le=1440)
     enabled: Optional[bool] = None
+
+
+class CsChecklistSlotState(BaseModel):
+    course: str = Field(default="", max_length=24)
+    title: str = Field(default="", max_length=120)
+    cr: str = Field(default="", max_length=12)
+    sem: str = Field(default="", max_length=16)
+    gr: str = Field(default="", max_length=12)
+    notes: str = Field(default="", max_length=120)
+    pinned: bool = False
+    cleared: bool = False
+
+
+class UpdateCsChecklistRequest(BaseModel):
+    college: Literal["arts", "engineering"] = "arts"
+    curriculum: Literal["current", "pre2024"] = "current"
+    include_active_schedule: bool = True
+    pe_completed: int = Field(default=0, ge=0, le=4)
+    slots: dict[str, CsChecklistSlotState] = Field(default_factory=dict, max_length=100)
+    sync_completed_courses: Optional[list[str]] = Field(default=None, max_length=200)

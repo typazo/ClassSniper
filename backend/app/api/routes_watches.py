@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import time
-from typing import Any
+from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.api.schemas import CreateWatchRequest, UpdateWatchRequest
+from app.api.schemas import BatchWatchGroupRequest, CreateWatchRequest, UpdateWatchRequest
 from app.auth import get_current_user, get_db
 from app.config import Settings, get_settings
 from app.db import Database
@@ -28,9 +29,124 @@ def get_catalog(request: Request) -> CatalogSyncService:
     return request.app.state.catalog
 
 
+def _parse_event_dt(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _filter_events_for_watch(watch: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    mode = str(watch.get("mode") or "")
+    target_nbr = watch.get("class_nbr")
+    comp_filter = str(watch.get("component_filter") or "").strip().upper()
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        if ev["roster"] != watch["roster"] or ev["subject"] != watch["subject"] or str(ev["catalog_nbr"]) != str(watch["catalog_nbr"]):
+            continue
+        if mode == "exact" and target_nbr is not None and int(ev["class_nbr"]) != int(target_nbr):
+            continue
+        if mode == "any_section" and comp_filter:
+            lbl = str(ev.get("section_label") or "").upper()
+            if not lbl.startswith(comp_filter):
+                continue
+        out.append(ev)
+    return out
+
+
+def _compute_window_stats(events: list[dict[str, Any]], cutoff: Optional[datetime]) -> dict[str, Any]:
+    scoped = []
+    for ev in events:
+        dt = _parse_event_dt(ev.get("detected_at"))
+        if dt is None:
+            continue
+        if cutoff is not None and dt < cutoff:
+            continue
+        scoped.append((dt, ev))
+
+    # Chronological order for open-window duration pairing
+    chrono = sorted(scoped, key=lambda pair: pair[0])
+    open_started: dict[int, datetime] = {}
+    durations_sec: list[float] = []
+    opened_count = 0
+    waitlisted_count = 0
+    closed_count = 0
+    last_opened_at: Optional[str] = None
+
+    for dt, ev in chrono:
+        new_st = str(ev.get("new_status") or "").upper()
+        cls_nbr = int(ev["class_nbr"])
+        if new_st == "O":
+            opened_count += 1
+            open_started[cls_nbr] = dt
+            last_opened_at = dt.isoformat()
+        elif new_st == "W":
+            waitlisted_count += 1
+        elif new_st == "C":
+            closed_count += 1
+
+        if new_st != "O" and cls_nbr in open_started:
+            dur = (dt - open_started.pop(cls_nbr)).total_seconds()
+            if dur >= 0:
+                durations_sec.append(dur)
+
+    avg_open_sec = round(sum(durations_sec) / len(durations_sec), 1) if durations_sec else None
+    median_open_sec = None
+    if durations_sec:
+        s_durs = sorted(durations_sec)
+        mid = len(s_durs) // 2
+        median_open_sec = round(
+            s_durs[mid] if len(s_durs) % 2 == 1 else (s_durs[mid - 1] + s_durs[mid]) / 2.0,
+            1,
+        )
+
+    return {
+        "total_flips": len(scoped),
+        "opened_count": opened_count,
+        "waitlisted_count": waitlisted_count,
+        "closed_count": closed_count,
+        "avg_open_sec": avg_open_sec,
+        "median_open_sec": median_open_sec,
+        "last_opened_at": last_opened_at,
+    }
+
+
 async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not rows:
         return []
+
+    course_keys = sorted({(str(w["roster"]), str(w["subject"]), str(w["catalog_nbr"])) for w in rows})
+    events_by_course: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    if course_keys:
+        placeholders = " OR ".join("(roster = ? AND subject = ? AND catalog_nbr = ?)" for _ in course_keys)
+        params: list[Any] = []
+        for r, s, c in course_keys:
+            params.extend([r, s, c])
+        ev_rows = await db.fetch_all(
+            f"""
+            SELECT roster, subject, catalog_nbr, class_nbr, section_label,
+                   old_status, new_status, detected_at
+            FROM status_events
+            WHERE {placeholders}
+            ORDER BY detected_at DESC
+            LIMIT 2000
+            """,
+            params,
+        )
+        for ev in ev_rows:
+            k = (str(ev["roster"]), str(ev["subject"]), str(ev["catalog_nbr"]))
+            events_by_course.setdefault(k, []).append(ev)
+
+    now_dt = datetime.now(timezone.utc)
+    c_24h = now_dt - timedelta(hours=24)
+    c_7d = now_dt - timedelta(days=7)
+    c_30d = now_dt - timedelta(days=30)
 
     enriched: list[dict[str, Any]] = []
     for w in rows:
@@ -162,6 +278,25 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
                 )
             )
         item["open_sections"] = open_sections
+        item["group_key"] = str(item.get("group_key") or "").strip()
+        course_events = _filter_events_for_watch(
+            item,
+            events_by_course.get((str(w["roster"]), str(w["subject"]), str(w["catalog_nbr"])), []),
+        )
+        s24 = _compute_window_stats(course_events, c_24h)
+        s7 = _compute_window_stats(course_events, c_7d)
+        s30 = _compute_window_stats(course_events, c_30d)
+        s_all = _compute_window_stats(course_events, None)
+        item["turnover_summary"] = {
+            "h24": s24["total_flips"],
+            "d7": s7["total_flips"],
+            "d30": s30["total_flips"],
+            "all": s_all["total_flips"],
+            "opened_24h": s24["opened_count"],
+            "opened_7d": s7["opened_count"],
+            "avg_open_sec_7d": s7["avg_open_sec"],
+            "last_opened_at": s_all["last_opened_at"],
+        }
         enriched.append(item)
     return enriched
 
@@ -333,15 +468,17 @@ async def create_watch(
 
     priority = body.priority if user["role"] == "admin" else 1
     ith_flag = 1 if (body.mode == "any_section" and body.ithaca_or_virtual) else 0
+    group_key = " ".join((body.group_key or "").split())[:48]
 
     cursor = await db.execute(
         """
         INSERT INTO watches (
             user_id, roster, subject, catalog_nbr, course_title,
             class_nbr, enroll_group_idx, component_filter, mode, trigger_on,
-            priority, active, auto_pause, ithaca_or_virtual, cooldown_sec, last_observed_status
+            priority, active, auto_pause, ithaca_or_virtual, cooldown_sec,
+            group_key, last_observed_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
         """,
         (
             user["id"],
@@ -358,6 +495,7 @@ async def create_watch(
             1 if body.auto_pause else 0,
             ith_flag,
             body.cooldown_sec,
+            group_key,
             last_observed,
         ),
     )
@@ -405,6 +543,9 @@ async def update_watch(
     if body.cooldown_sec is not None:
         updates.append("cooldown_sec = ?")
         params.append(body.cooldown_sec)
+    if body.group_key is not None:
+        updates.append("group_key = ?")
+        params.append(" ".join(body.group_key.split())[:48])
 
     if updates:
         params.append(watch_id)
@@ -464,3 +605,101 @@ async def delete_watch(
     await db.execute("DELETE FROM watches WHERE id = ?", (watch_id,))
     poller.wake()
     return {"status": "deleted"}
+
+
+@router.post("/group")
+async def batch_update_watch_group(
+    body: BatchWatchGroupRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+) -> dict[str, Any]:
+    """Assign or clear a mutually-exclusive 'Pick Any 1' group_key across owned watches."""
+    group_key = " ".join(body.group_key.split())[:48]
+    ids = sorted(set(body.watch_ids))
+    placeholders = ", ".join("?" for _ in ids)
+    rows = await db.fetch_all(
+        f"SELECT id, user_id FROM watches WHERE id IN ({placeholders})",
+        ids,
+    )
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No matching watches found")
+    for r in rows:
+        if r["user_id"] != user["id"] and user["role"] != "admin":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for one or more watches")
+
+    async with db.write_tx() as conn:
+        await conn.execute(
+            f"UPDATE watches SET group_key = ? WHERE id IN ({placeholders})",
+            [group_key, *ids],
+        )
+
+    updated_rows = await db.fetch_all(
+        """
+        SELECT *
+        FROM watches
+        WHERE user_id = ?
+        ORDER BY active DESC, priority DESC, created_at DESC
+        """,
+        (user["id"],),
+    )
+    return {"watches": await _enrich_watches(db, updated_rows), "group_key": group_key}
+
+
+@router.get("/{watch_id}/history")
+async def get_watch_history(
+    watch_id: int,
+    window: Literal["24h", "7d", "30d", "all"] = Query(default="7d"),
+    limit: int = Query(default=60, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+) -> dict[str, Any]:
+    """Return multi-window seat turnover statistics and status flip timeline for a watch."""
+    watch = await _get_owned_watch(db, watch_id, user)
+    rows = await db.fetch_all(
+        """
+        SELECT id, roster, subject, catalog_nbr, class_nbr, section_label,
+               old_status, new_status, poll_rtt_ms, detected_at
+        FROM status_events
+        WHERE roster = ? AND subject = ? AND catalog_nbr = ?
+        ORDER BY detected_at DESC, id DESC
+        LIMIT 2000
+        """,
+        (watch["roster"], watch["subject"], watch["catalog_nbr"]),
+    )
+    matching = _filter_events_for_watch(watch, rows)
+
+    now_dt = datetime.now(timezone.utc)
+    cutoffs: dict[str, Optional[datetime]] = {
+        "24h": now_dt - timedelta(hours=24),
+        "7d": now_dt - timedelta(days=7),
+        "30d": now_dt - timedelta(days=30),
+        "all": None,
+    }
+    windows = {
+        key: _compute_window_stats(matching, cutoff)
+        for key, cutoff in cutoffs.items()
+    }
+
+    selected_cutoff = cutoffs[window]
+    filtered_events: list[dict[str, Any]] = []
+    for ev in matching:
+        dt = _parse_event_dt(ev.get("detected_at"))
+        if dt is None:
+            continue
+        if selected_cutoff is not None and dt < selected_cutoff:
+            continue
+        filtered_events.append(
+            {
+                **ev,
+                "detected_at": dt.isoformat(),
+            }
+        )
+        if len(filtered_events) >= limit:
+            break
+
+    return {
+        "watch_id": watch_id,
+        "window": window,
+        "windows": windows,
+        "events": filtered_events,
+    }

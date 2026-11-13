@@ -1,18 +1,22 @@
 import React, { useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   Check,
   Copy,
   ExternalLink,
+  Layers,
+  Loader2,
   MapPin,
   Pause,
   Play,
   RefreshCw,
   RotateCcw,
   Trash2,
+  X,
 } from "lucide-react";
 import { api } from "../api/client";
-import type { Watch } from "../types";
+import type { Watch, WatchHistoryResponse, WatchHistoryWindow } from "../types";
 import { getSectionLocationTag, getSectionVirtualLabel } from "../utils/location";
 import { copyText } from "../utils/pwa";
 import { StatusBadge } from "./StatusBadge";
@@ -30,11 +34,34 @@ const MODE_LABELS: Record<Watch["mode"], string> = {
   any_section: "Any Section",
 };
 
+function formatDurationSec(sec: number | null): string {
+  if (sec === null || sec === undefined) return "—";
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const mins = Math.floor(sec / 60);
+  const rem = Math.round(sec % 60);
+  if (mins < 60) return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const remMin = mins % 60;
+  return remMin > 0 ? `${hrs}h ${remMin}m` : `${hrs}h`;
+}
+
 export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearch }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [checkMsg, setCheckMsg] = useState<Record<number, string>>({});
+
+  // Low-clutter Pick-1 Group batch mode
+  const [groupingMode, setGroupingMode] = useState(false);
+  const [selectedForGroup, setSelectedForGroup] = useState<number[]>([]);
+  const [groupInputName, setGroupInputName] = useState("");
+  const [savingGroup, setSavingGroup] = useState(false);
+
+  // Per-watch expandable turnover stats & history
+  const [expandedHistoryId, setExpandedHistoryId] = useState<number | null>(null);
+  const [historyWindowById, setHistoryWindowById] = useState<Record<number, WatchHistoryWindow>>({});
+  const [historyDataById, setHistoryDataById] = useState<Record<number, WatchHistoryResponse>>({});
+  const [historyLoadingId, setHistoryLoadingId] = useState<number | null>(null);
 
   async function handleCopy(watch: Watch) {
     if (!watch.class_nbr) return;
@@ -102,6 +129,53 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
     }
   }
 
+  async function loadWatchHistory(watchId: number, window: WatchHistoryWindow) {
+    setHistoryWindowById((p) => ({ ...p, [watchId]: window }));
+    setHistoryLoadingId(watchId);
+    try {
+      const res = await api.getWatchHistory(watchId, window);
+      setHistoryDataById((p) => ({ ...p, [watchId]: res }));
+    } finally {
+      setHistoryLoadingId((cur) => (cur === watchId ? null : cur));
+    }
+  }
+
+  function handleToggleHistory(watchId: number) {
+    if (expandedHistoryId === watchId) {
+      setExpandedHistoryId(null);
+      return;
+    }
+    setExpandedHistoryId(watchId);
+    const win = historyWindowById[watchId] || "7d";
+    void loadWatchHistory(watchId, win);
+  }
+
+  async function handleApplyGroup(clear = false) {
+    if (selectedForGroup.length === 0) return;
+    const label = clear ? "" : groupInputName.trim();
+    if (!clear && !label) return;
+    setSavingGroup(true);
+    try {
+      await api.batchUpdateWatchGroup(selectedForGroup, label);
+      setGroupingMode(false);
+      setSelectedForGroup([]);
+      setGroupInputName("");
+      onRefresh();
+    } finally {
+      setSavingGroup(false);
+    }
+  }
+
+  async function handleClearSingleGroup(watch: Watch) {
+    setBusyId(watch.id);
+    try {
+      await api.updateWatch(watch.id, { group_key: "" });
+      onRefresh();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   if (watches.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/40 p-10 text-center">
@@ -130,6 +204,69 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
 
   return (
     <div className="space-y-3">
+      {watches.length >= 2 && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {groupingMode ? (
+            <div className="flex w-full flex-wrap items-center justify-between gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-3.5 py-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Layers className="h-3.5 w-3.5 text-violet-300" />
+                <span className="text-violet-100 font-medium">
+                  Select 2+ watches ({selectedForGroup.length} picked):
+                </span>
+                <input
+                  type="text"
+                  maxLength={48}
+                  value={groupInputName}
+                  onChange={(e) => setGroupInputName(e.target.value)}
+                  placeholder="Group label (e.g. FWS Pick 1)"
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs text-white placeholder-zinc-500"
+                />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={savingGroup || selectedForGroup.length === 0 || !groupInputName.trim()}
+                  onClick={() => void handleApplyGroup(false)}
+                  className="rounded-lg bg-violet-500 px-2.5 py-1 text-xs font-semibold text-zinc-950 hover:bg-violet-400 disabled:opacity-40"
+                >
+                  Link Pick-1
+                </button>
+                <button
+                  type="button"
+                  disabled={savingGroup || selectedForGroup.length === 0}
+                  onClick={() => void handleApplyGroup(true)}
+                  className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                >
+                  Unlink
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGroupingMode(false);
+                    setSelectedForGroup([]);
+                  }}
+                  className="rounded-lg p-1 text-zinc-400 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="ml-auto">
+              <button
+                type="button"
+                onClick={() => setGroupingMode(true)}
+                title="Group watches so triggering any 1 automatically pauses the rest"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-medium text-zinc-300 hover:border-violet-500/40 hover:text-violet-200"
+              >
+                <Layers className="h-3 w-3 text-violet-400" />
+                Link Pick-1 Group
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {quickOpenCodes.length > 0 && (
         <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-3.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -196,6 +333,18 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
+                  {groupingMode && (
+                    <input
+                      type="checkbox"
+                      checked={selectedForGroup.includes(w.id)}
+                      onChange={(e) => {
+                        setSelectedForGroup((prev) =>
+                          e.target.checked ? [...prev, w.id] : prev.filter((id) => id !== w.id)
+                        );
+                      }}
+                      className="h-4 w-4 accent-violet-400"
+                    />
+                  )}
                   <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs font-semibold text-zinc-300">
                     {w.roster}
                   </span>
@@ -224,6 +373,23 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                     <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                       <MapPin className="h-3 w-3" />
                       Ithaca + Virtual
+                    </span>
+                  )}
+                  {w.group_key && (
+                    <span
+                      title="Pick Any 1 Group: when 1 watch in this group alerts, the others auto-pause"
+                      className="inline-flex items-center gap-1 rounded-md border border-violet-500/40 bg-violet-500/15 px-2 py-0.5 text-[11px] font-medium text-violet-200"
+                    >
+                      <Layers className="h-3 w-3 text-violet-300" />
+                      Pick-1: {w.group_key}
+                      <button
+                        type="button"
+                        onClick={() => void handleClearSingleGroup(w)}
+                        className="ml-0.5 text-violet-300 hover:text-white"
+                        aria-label={`Remove ${w.group_key} group`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
                     </span>
                   )}
                   {!w.active && (
@@ -358,6 +524,23 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
 
               <div className="flex items-center gap-1.5">
                 <button
+                  type="button"
+                  onClick={() => handleToggleHistory(w.id)}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs transition ${
+                    expandedHistoryId === w.id
+                      ? "border-sky-500/50 bg-sky-500/15 text-sky-200"
+                      : "border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                  }`}
+                  title="Inspect multi-window turnover stats and seat flip history"
+                >
+                  <Activity className="h-3 w-3 text-sky-300" />
+                  <span>
+                    {w.turnover_summary && w.turnover_summary.all > 0
+                      ? `Activity (${w.turnover_summary.h24}d / ${w.turnover_summary.d7}w)`
+                      : "Activity"}
+                  </span>
+                </button>
+                <button
                   onClick={() => handleCheckNow(w)}
                   disabled={busyId === w.id}
                   className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
@@ -393,6 +576,130 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                 </button>
               </div>
             </div>
+
+            {expandedHistoryId === w.id && (
+              <div className="mt-3 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/85 p-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+                    <Activity className="h-3.5 w-3.5" />
+                    <span>Seat Turnover &amp; Flip History</span>
+                  </div>
+                  <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
+                    {(
+                      [
+                        { id: "24h", label: "24h" },
+                        { id: "7d", label: "7d" },
+                        { id: "30d", label: "30d" },
+                        { id: "all", label: "All" },
+                      ] as const
+                    ).map((winOpt) => {
+                      const activeWin = (historyWindowById[w.id] || "7d") === winOpt.id;
+                      const winCnt = historyDataById[w.id]?.windows?.[winOpt.id]?.total_flips;
+                      return (
+                        <button
+                          key={winOpt.id}
+                          type="button"
+                          onClick={() => void loadWatchHistory(w.id, winOpt.id)}
+                          className={`rounded-md px-2 py-0.5 font-medium ${
+                            activeWin ? "bg-sky-500 text-zinc-950" : "text-zinc-400 hover:text-white"
+                          }`}
+                        >
+                          {winOpt.label}
+                          {winCnt !== undefined ? ` (${winCnt})` : ""}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {historyLoadingId === w.id && !historyDataById[w.id] ? (
+                  <div className="flex items-center gap-2 py-3 text-zinc-400">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                    Loading flip statistics...
+                  </div>
+                ) : (
+                  historyDataById[w.id] && (
+                    <>
+                      {(() => {
+                        const hist = historyDataById[w.id];
+                        const curWin = historyWindowById[w.id] || hist.window;
+                        const stats = hist.windows[curWin];
+                        return (
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                              <div className="text-[10px] text-zinc-400">Total Flips</div>
+                              <div className="text-sm font-bold text-white">{stats.total_flips}</div>
+                            </div>
+                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                              <div className="text-[10px] text-zinc-400">Opened (O)</div>
+                              <div className="text-sm font-bold text-emerald-300">{stats.opened_count}</div>
+                            </div>
+                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                              <div className="text-[10px] text-zinc-400">Closed (C)</div>
+                              <div className="text-sm font-bold text-rose-300">{stats.closed_count}</div>
+                            </div>
+                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                              <div className="text-[10px] text-zinc-400">Avg Open Window</div>
+                              <div className="text-sm font-bold text-sky-200">
+                                {formatDurationSec(stats.avg_open_sec)}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {historyDataById[w.id].events.length === 0 ? (
+                        <p className="text-[11px] text-zinc-500">
+                          No recorded status flips in this time window yet. Flips are recorded automatically during live polling.
+                        </p>
+                      ) : (
+                        <div className="max-h-44 divide-y divide-zinc-800/80 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/40">
+                          {historyDataById[w.id].events.map((ev) => (
+                            <div
+                              key={ev.id}
+                              className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 text-[11px]"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-zinc-300">#{ev.class_nbr}</span>
+                                <span className="text-zinc-400">{ev.section_label}</span>
+                                <span className="font-semibold text-white">
+                                  <span
+                                    className={
+                                      ev.old_status === "O"
+                                        ? "text-emerald-300"
+                                        : ev.old_status === "W"
+                                          ? "text-amber-300"
+                                          : "text-rose-300"
+                                    }
+                                  >
+                                    {ev.old_status || "?"}
+                                  </span>
+                                  {" → "}
+                                  <span
+                                    className={
+                                      ev.new_status === "O"
+                                        ? "text-emerald-300"
+                                        : ev.new_status === "W"
+                                          ? "text-amber-300"
+                                          : "text-rose-300"
+                                    }
+                                  >
+                                    {ev.new_status}
+                                  </span>
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-zinc-500">
+                                {new Date(ev.detected_at).toLocaleString()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )
+                )}
+              </div>
+            )}
           </div>
         );
       })}

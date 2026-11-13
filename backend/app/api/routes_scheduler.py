@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -18,7 +19,12 @@ from app.api.schemas import (
 )
 from app.auth import get_current_user
 from app.services.catalog import CatalogSyncService
+from app.services.insights import CourseInsightsService
 from app.services.scheduler import SchedulerService
+
+
+def get_insights(request: Request) -> CourseInsightsService:
+    return request.app.state.insights
 
 router = APIRouter(prefix="/api/schedules", tags=["scheduler"])
 
@@ -321,3 +327,45 @@ async def delete_schedule_block(
     if hydrated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule block not found")
     return hydrated
+
+
+@router.post("/{schedule_id}/insights")
+async def batch_load_schedule_insights(
+    schedule_id: int,
+    force: bool = Query(default=False),
+    user: dict[str, Any] = Depends(get_current_user),
+    scheduler: SchedulerService = Depends(get_scheduler),
+    insights: CourseInsightsService = Depends(get_insights),
+) -> dict[str, Any]:
+    """Fetch CU Reviews & RateMyProfessors insights for all courses in a schedule."""
+    hydrated = await scheduler.hydrate_schedule(schedule_id, user_id=int(user["id"]), user=user)
+    if hydrated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+
+    roster_u = str((hydrated.get("schedule") or {}).get("roster") or hydrated.get("roster") or "").upper()
+    sem = asyncio.Semaphore(3)
+    courses_to_load = [
+        c
+        for c in hydrated["courses"]
+        if force or (c.get("cached_insights") is None and not (c.get("cached_rmp") or {}))
+    ]
+
+    async def _fetch_one(course_item: dict[str, Any]) -> bool:
+        async with sem:
+            try:
+                await insights.get_course_insights(
+                    roster_u,
+                    str(course_item["subject"]),
+                    str(course_item["catalog_nbr"]),
+                    force=force,
+                )
+                return True
+            except Exception:
+                return False
+
+    results = await asyncio.gather(*(_fetch_one(c) for c in courses_to_load))
+    refreshed = await scheduler.hydrate_schedule(schedule_id, user_id=int(user["id"]), user=user)
+    return {
+        **(refreshed or hydrated),
+        "insights_fetched_count": sum(1 for ok in results if ok),
+    }

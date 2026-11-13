@@ -9,10 +9,18 @@ from typing import Any, Literal, Optional
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from app.api.schemas import CompletedPrereqsRequest, RefreshSubjectsRequest, SyncCatalogRequest
+from app.api.schemas import (
+    CompletedPrereqsRequest,
+    RefreshSubjectsRequest,
+    SyncCatalogRequest,
+    UpdateCsChecklistRequest,
+)
 from app.auth import get_current_user, get_db
 from app.db import Database
+from app.services.attributes import extract_course_attributes
 from app.services.catalog import CatalogSyncService
+from app.services.cs_checklist import build_cs_checklist_payload
+from app.services.cs_requirements import normalize_completed_courses
 from app.services.insights import CourseInsightsService, build_external_links
 
 router = APIRouter(prefix="/api", tags=["courses"])
@@ -88,7 +96,7 @@ async def search_courses(
     subjects: str = Query(default="", max_length=300),
     level_min: Optional[int] = Query(default=None, ge=1000, le=9000),
     min_credits: Optional[float] = Query(default=None, ge=0.0, le=20.0),
-    cs_requirement: Literal["", "cs_elective", "tech_elective", "external_spec"] = Query(default=""),
+    cs_requirement: Literal["", "cs_elective", "cs_project", "tech_elective", "external_spec"] = Query(default=""),
     include_2000_te: bool = Query(default=True),
     include_research_te: bool = Query(default=True),
     curriculum: Literal["current", "pre2024"] = Query(default="current"),
@@ -96,6 +104,8 @@ async def search_courses(
     ilr_match: Literal["any", "all"] = Query(default="any"),
     ilr_multi_only: bool = Query(default=False),
     include_ilr: bool = Query(default=False),
+    attrs: str = Query(default="", max_length=200),
+    attr_match: Literal["any", "all"] = Query(default="any"),
     only_eligible: bool = Query(default=False),
     include_implied_prereqs: Optional[bool] = Query(default=None),
     ithaca_or_virtual: bool = Query(default=True),
@@ -111,6 +121,7 @@ async def search_courses(
             parsed_subjects.insert(0, single)
 
     parsed_ilr_codes = [c.strip().upper() for c in ilr_codes.split(",") if c.strip()]
+    parsed_attrs = [c.strip().upper() for c in attrs.split(",") if c.strip()]
     effective_include_ilr = (
         include_ilr
         or bool(parsed_ilr_codes)
@@ -139,6 +150,8 @@ async def search_courses(
         ilr_match=ilr_match,
         ilr_multi_only=ilr_multi_only,
         include_ilr=effective_include_ilr,
+        attrs=parsed_attrs,
+        attr_match=attr_match,
         completed_courses=completed_courses,
         only_eligible=only_eligible,
         include_implied_prereqs=effective_implied,
@@ -151,6 +164,17 @@ async def search_courses(
         "courses": result["courses"],
         "meta": result["meta"],
     }
+
+
+@router.get("/courses/attributes")
+async def get_course_attribute_options(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    _: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    options = await catalog.get_attribute_options(target_roster)
+    return {"roster": target_roster, "attributes": options}
 
 
 @router.get("/ilr/summary")
@@ -259,6 +283,7 @@ async def get_course_detail(
         ilr_index = await catalog.get_ilr_requirements_index(roster_u)
         elig = ilr_index.get(subject_u, catalog_nbr)
         course["ilr_eligibility"] = elig.to_dict() if elig is not None else None
+    course["crse_attrs"] = extract_course_attributes(course)
     course.pop("crse_attrs_json", None)
     return {"course": course}
 
@@ -367,3 +392,66 @@ async def get_user_prereq_options(
         mode=effective_mode,
     )
     return {"roster": target_roster, "options": options}
+
+
+@router.get("/cs/checklist")
+async def get_cs_checklist(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    cs_index = await catalog.get_cs_requirements_index(target_roster)
+    return await build_cs_checklist_payload(
+        db=db,
+        user=user,
+        cs_index=cs_index,
+        roster=target_roster,
+    )
+
+
+@router.put("/cs/checklist")
+async def update_cs_checklist(
+    body: UpdateCsChecklistRequest,
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Database = Depends(get_db),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    serialized = json.dumps(
+        {
+            "college": body.college,
+            "curriculum": body.curriculum,
+            "include_active_schedule": body.include_active_schedule,
+            "pe_completed": body.pe_completed,
+            "slots": {k: v.model_dump() for k, v in body.slots.items()},
+        }
+    )
+    completed_override: Optional[list[str]] = None
+    async with db.write_tx() as conn:
+        if body.sync_completed_courses is not None:
+            completed_override = normalize_completed_courses(body.sync_completed_courses)
+            await conn.execute(
+                """
+                UPDATE users
+                SET cs_checklist_json = ?,
+                    completed_courses_json = ?
+                WHERE id = ?
+                """,
+                (serialized, json.dumps(completed_override), user["id"]),
+            )
+        else:
+            await conn.execute(
+                "UPDATE users SET cs_checklist_json = ? WHERE id = ?",
+                (serialized, user["id"]),
+            )
+    cs_index = await catalog.get_cs_requirements_index(target_roster)
+    return await build_cs_checklist_payload(
+        db=db,
+        user=user,
+        cs_index=cs_index,
+        roster=target_roster,
+        completed_courses_override=completed_override,
+    )

@@ -113,6 +113,23 @@ CS_ELECTIVE_EXCLUDED: frozenset[str] = frozenset(
     {"CS 4090", "CS 4997", "CS 4998", "CS 4999", "CS 5998", "CS 5999", "CS 7999"}
 )
 
+# Official CS Project / Practicum courses (CS 4xx1 practicums + designated project courses)
+CS_PROJECT_EXPLICIT: frozenset[str] = frozenset(
+    {
+        "CS 3152",
+        "CS 4152",
+        "CS 4154",
+        "CS 4752",
+        "CS 5150",
+        "CS 5152",
+        "CS 5412",
+        "CS 5414",
+        "CS 5431",
+        "CS 5625",
+        "CS 5643",
+    }
+)
+
 # Mandatory upper-level CS Core (and their direct 5000-level cross-lists)
 CS_CORE_FIXED: frozenset[str] = frozenset({"CS 4410", "CS 4414", "CS 4820"})
 
@@ -916,6 +933,7 @@ class CourseEligibility:
     cs_elective: bool = False
     cs_elective_pre2024: bool = False
     cs_elective_warning: str = ""
+    cs_project: bool = False
     tech_elective: bool = False
     tech_elective_is_2000: bool = False
     tech_elective_is_research: bool = False
@@ -930,6 +948,7 @@ class CourseEligibility:
             "cs_elective": self.cs_elective,
             "cs_elective_pre2024": self.cs_elective_pre2024,
             "cs_elective_warning": self.cs_elective_warning,
+            "cs_project": self.cs_project,
             "tech_elective": self.tech_elective,
             "tech_elective_is_2000": self.tech_elective_is_2000,
             "tech_elective_is_research": self.tech_elective_is_research,
@@ -1162,6 +1181,17 @@ class CSRequirementsIndex:
                     else:
                         elig.cs_elective_warning = "Allowed only if NOT used for CS Core"
 
+            if (
+                eligible_3cr_letter
+                and not non_academic
+                and (
+                    (subj == "CS" and 4000 <= cat_num < 5000 and cat_num % 10 == 1)
+                    or code in CS_PROJECT_EXPLICIT
+                    or any(c in CS_PROJECT_EXPLICIT for c in cross)
+                )
+            ):
+                elig.cs_project = True
+
             # 2) Technical Electives (all subjects, CS 3000+ auto or prereq/chain >= 2000)
             te_excluded = (
                 subj == "PE"
@@ -1230,6 +1260,14 @@ class CSRequirementsIndex:
                         "kind": "cs_elective",
                         "tone": "amber" if is_core_overflow_ai_ml else "emerald",
                         "label": "CS Elective" + (" (If not Core)" if is_core_overflow_ai_ml else ""),
+                    }
+                )
+            if elig.cs_project:
+                badges.append(
+                    {
+                        "kind": "cs_project",
+                        "tone": "violet",
+                        "label": "CS Project",
                     }
                 )
             if elig.tech_elective:

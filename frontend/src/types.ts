@@ -60,8 +60,14 @@ export interface ExternalCourseLinks {
   rmp_search: string;
 }
 
-export type CSRequirementMode = "" | "cs_elective" | "tech_elective" | "external_spec";
+export type CSRequirementMode =
+  | ""
+  | "cs_elective"
+  | "cs_project"
+  | "tech_elective"
+  | "external_spec";
 export type CSCurriculumMode = "current" | "pre2024";
+export type AttrMatchMode = "any" | "all";
 
 export interface CourseCSBadge {
   kind: string;
@@ -73,6 +79,7 @@ export interface CourseCSEligibility {
   cs_elective: boolean;
   cs_elective_pre2024: boolean;
   cs_elective_warning: string;
+  cs_project?: boolean;
   tech_elective: boolean;
   tech_elective_is_2000: boolean;
   tech_elective_is_research: boolean;
@@ -108,6 +115,7 @@ export interface CourseSummary {
   has_letter_grade?: boolean;
   crosslists?: string[];
   components?: string[];
+  crse_attrs?: string[];
   cs_eligibility?: CourseCSEligibility;
   ilr_eligibility?: CourseIlrEligibility | null;
   hidden_other_location_count?: number;
@@ -335,8 +343,51 @@ export interface Watch {
   last_notified_status: string | null;
   last_notified_at: string | null;
   created_at: string;
+  group_key?: string;
   section_info: WatchSectionInfo | null;
   open_sections?: WatchOpenSection[];
+  turnover_summary?: {
+    h24: number;
+    d7: number;
+    d30: number;
+    all: number;
+    opened_24h: number;
+    opened_7d: number;
+    avg_open_sec_7d: number | null;
+    last_opened_at: string | null;
+  };
+}
+
+export type WatchHistoryWindow = "24h" | "7d" | "30d" | "all";
+
+export interface WatchTurnoverWindowStats {
+  total_flips: number;
+  opened_count: number;
+  waitlisted_count: number;
+  closed_count: number;
+  avg_open_sec: number | null;
+  median_open_sec: number | null;
+  last_opened_at: string | null;
+}
+
+export interface WatchStatusEventItem {
+  id: number;
+  roster: string;
+  subject: string;
+  catalog_nbr: string;
+  class_nbr: number;
+  section_label: string;
+  old_status: string | null;
+  new_status: string;
+  poll_rtt_ms: number;
+  detected_at: string;
+}
+
+export interface WatchHistoryResponse {
+  watch_id: number;
+  window: WatchHistoryWindow;
+  windows: Record<WatchHistoryWindow, WatchTurnoverWindowStats>;
+  events: WatchStatusEventItem[];
 }
 
 export interface PushSubscriptionItem {
@@ -590,4 +641,94 @@ export interface SchedulesListResponse {
   roster: string;
   schedules: ScheduleSummary[];
   active: HydratedSchedule;
+  insights_fetched_count?: number;
+}
+
+export interface AttributeOption {
+  code: string;
+  label: string;
+  group: "as_dist" | "college" | "eng_cals" | "exploratory" | "other" | string;
+  count: number;
+}
+
+export interface CourseSearchPreset {
+  id: number;
+  label?: string;
+  q?: string;
+  subjects?: string[];
+  level_min?: number | "";
+  min_credits?: number | "";
+  cs_requirement?: CSRequirementMode;
+  attrs?: string[];
+  attr_match?: AttrMatchMode;
+  curriculum?: CSCurriculumMode;
+}
+
+export interface CsChecklistSearchHint {
+  q?: string;
+  subjects?: string[];
+  min_credits?: number;
+  cs_requirement?: CSRequirementMode;
+  attrs?: string[];
+  attr_match?: AttrMatchMode;
+}
+
+export interface CsChecklistSlotInput {
+  course: string;
+  title: string;
+  cr: string;
+  sem: string;
+  gr: string;
+  notes: string;
+  pinned?: boolean;
+  cleared?: boolean;
+}
+
+export interface CsChecklistSlot {
+  id: string;
+  label: string;
+  expected: string;
+  filled: boolean;
+  course: string;
+  title: string;
+  cr: string;
+  sem: string;
+  gr: string;
+  notes: string;
+  attrs: string[];
+  attr_code?: string;
+  source: "completed" | "schedule" | "manual" | "empty";
+  search: CsChecklistSearchHint;
+}
+
+export interface CsChecklistSection {
+  id: string;
+  title: string;
+  subtitle: string;
+  slots: CsChecklistSlot[];
+}
+
+export interface CsChecklistPayload {
+  roster: string;
+  college: "arts" | "engineering";
+  curriculum: CSCurriculumMode;
+  include_active_schedule: boolean;
+  active_schedule_name: string;
+  pe_completed: number;
+  completed_courses: string[];
+  planned_courses: string[];
+  as_distribution_summary: {
+    covered_categories: number;
+    total_categories: number;
+    unique_courses: number;
+    min_unique_courses: number;
+  } | null;
+  summary: {
+    total_slots: number;
+    filled_slots: number;
+    completed_slots: number;
+    whatif_slots: number;
+    remaining_slots: number;
+  };
+  sections: CsChecklistSection[];
 }

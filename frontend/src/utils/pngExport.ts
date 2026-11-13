@@ -1,0 +1,276 @@
+import type { DayCode, HydratedSchedule, ScheduleBlock, ScheduleCourseItem } from "../types";
+import { computeScheduleDiagnostics, formatMinutesShort } from "./schedulerSolver";
+
+const PALETTE: Array<{ bg: string; border: string; text: string; sub: string }> = [
+  { bg: "#064e3b", border: "#34d399", text: "#ecfdf5", sub: "#a7f3d0" },
+  { bg: "#0c4a6e", border: "#38bdf8", text: "#f0f9ff", sub: "#bae6fd" },
+  { bg: "#4c1d95", border: "#a78bfa", text: "#f5f3ff", sub: "#ddd6fe" },
+  { bg: "#78350f", border: "#fbbf24", text: "#fffbeb", sub: "#fde68a" },
+  { bg: "#881337", border: "#fb7185", text: "#fff1f2", sub: "#fecdd3" },
+  { bg: "#164e63", border: "#22d3ee", text: "#ecfeff", sub: "#a5f3fc" },
+  { bg: "#312e81", border: "#818cf8", text: "#eef2ff", sub: "#c7d2fe" },
+  { bg: "#701a75", border: "#e879f9", text: "#fdf4ff", sub: "#f5d0fe" },
+  { bg: "#134e4a", border: "#2dd4bf", text: "#f0fdfa", sub: "#99f6e4" },
+  { bg: "#7c2d12", border: "#fb923c", text: "#fff7ed", sub: "#fed7aa" },
+];
+
+const DAY_DEFS: Array<{ code: DayCode; label: string }> = [
+  { code: "M", label: "Monday" },
+  { code: "T", label: "Tuesday" },
+  { code: "W", label: "Wednesday" },
+  { code: "R", label: "Thursday" },
+  { code: "F", label: "Friday" },
+  { code: "Sa", label: "Saturday" },
+  { code: "Su", label: "Sunday" },
+];
+
+interface CanvasEvent {
+  day: DayCode;
+  startMin: number;
+  endMin: number;
+  title: string;
+  subtitle: string;
+  room: string;
+  isBlock: boolean;
+  colorIdx: number;
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+export function downloadSchedulePNG(
+  schedule: HydratedSchedule,
+  coursesOverride?: ScheduleCourseItem[],
+  blocksOverride?: ScheduleBlock[]
+): void {
+  const courses = (coursesOverride ?? schedule.courses).filter((c) => c.enabled);
+  const blocks = (blocksOverride ?? schedule.blocks).filter((b) => b.enabled);
+  const diag = computeScheduleDiagnostics(courses, blocks);
+
+  const rawEvents: CanvasEvent[] = [];
+  let minMin = 8 * 60;
+  let maxMin = 18 * 60;
+  let hasSat = false;
+  let hasSun = false;
+
+  for (const b of blocks) {
+    minMin = Math.min(minMin, b.start_min);
+    maxMin = Math.max(maxMin, b.end_min);
+    for (const day of b.days) {
+      if (day === "Sa") hasSat = true;
+      if (day === "Su") hasSun = true;
+      rawEvents.push({
+        day,
+        startMin: b.start_min,
+        endMin: b.end_min,
+        title: b.label || "Busy",
+        subtitle: `${formatMinutesShort(b.start_min)}-${formatMinutesShort(b.end_min)}`,
+        room: "",
+        isBlock: true,
+        colorIdx: 0,
+      });
+    }
+  }
+
+  for (const c of courses) {
+    const selected = new Set(c.selected_class_nbrs);
+    for (const eg of c.enroll_groups) {
+      for (const sec of eg.sections) {
+        if (!selected.has(sec.class_nbr)) continue;
+        for (const mtg of sec.meetings) {
+          minMin = Math.min(minMin, mtg.start_min);
+          maxMin = Math.max(maxMin, mtg.end_min);
+          for (const day of mtg.days) {
+            if (day === "Sa") hasSat = true;
+            if (day === "Su") hasSun = true;
+            rawEvents.push({
+              day,
+              startMin: mtg.start_min,
+              endMin: mtg.end_min,
+              title: `${c.subject} ${c.catalog_nbr}`,
+              subtitle: `${sec.ssr_component} ${sec.section} #${sec.class_nbr}`,
+              room: mtg.facility_descr || sec.instruction_mode || "",
+              isBlock: false,
+              colorIdx: c.color_idx,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const days = DAY_DEFS.filter(
+    (d) => (d.code !== "Sa" && d.code !== "Su") || (d.code === "Sa" && hasSat) || (d.code === "Su" && hasSun)
+  );
+  const startHour = Math.max(7, Math.floor(minMin / 60));
+  const endHour = Math.min(23, Math.max(startHour + 4, Math.ceil(maxMin / 60)));
+
+  const width = 1400;
+  const headerH = 82;
+  const dayHeaderH = 38;
+  const hourH = 62;
+  const footerH = 44;
+  const leftAxisW = 68;
+  const padX = 24;
+  const bodyH = (endHour - startHour) * hourH;
+  const height = headerH + dayHeaderH + bodyH + footerH;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  // Background
+  ctx.fillStyle = "#09090b";
+  ctx.fillRect(0, 0, width, height);
+
+  // Header
+  ctx.fillStyle = "#fafafa";
+  ctx.font = "bold 24px system-ui, -apple-system, sans-serif";
+  ctx.fillText(schedule.schedule.name, padX, 38);
+
+  const workloads = courses
+    .map((c) => c.cached_insights?.workload)
+    .filter((w): w is number => w != null);
+  const avgWorkload =
+    workloads.length > 0
+      ? Number((workloads.reduce((a, b) => a + b, 0) / workloads.length).toFixed(1))
+      : null;
+
+  const summaryParts = [
+    schedule.schedule.roster,
+    `${courses.length} course${courses.length === 1 ? "" : "s"}`,
+    `${Number(diag.totalCredits.toFixed(1))} cr`,
+    avgWorkload != null ? `Avg workload ${avgWorkload}/5` : null,
+  ].filter(Boolean);
+  ctx.fillStyle = "#a1a1aa";
+  ctx.font = "14px system-ui, -apple-system, sans-serif";
+  ctx.fillText(summaryParts.join("  ·  "), padX, 64);
+
+  const gridLeft = padX + leftAxisW;
+  const gridWidth = width - gridLeft - padX;
+  const colW = gridWidth / days.length;
+  const gridTop = headerH + dayHeaderH;
+
+  // Day Headers & Grid Borders
+  ctx.strokeStyle = "#27272a";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#18181b";
+  ctx.fillRect(gridLeft, headerH, gridWidth, dayHeaderH);
+
+  days.forEach((d, idx) => {
+    const x = gridLeft + idx * colW;
+    ctx.beginPath();
+    ctx.moveTo(x, headerH);
+    ctx.lineTo(x, gridTop + bodyH);
+    ctx.stroke();
+
+    ctx.fillStyle = "#e4e4e7";
+    ctx.font = "600 13px system-ui, -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(d.label, x + colW / 2, headerH + 24);
+  });
+  ctx.textAlign = "left";
+
+  // Hour lines & labels
+  for (let h = startHour; h <= endHour; h += 1) {
+    const y = gridTop + (h - startHour) * hourH;
+    ctx.strokeStyle = h === startHour || h === endHour ? "#3f3f46" : "#27272a";
+    ctx.beginPath();
+    ctx.moveTo(gridLeft, y);
+    ctx.lineTo(gridLeft + gridWidth, y);
+    ctx.stroke();
+
+    if (h < endHour) {
+      const hr12 = h % 12 === 0 ? 12 : h % 12;
+      const suffix = h >= 12 ? "PM" : "AM";
+      ctx.fillStyle = "#71717a";
+      ctx.font = "12px system-ui, -apple-system, sans-serif";
+      ctx.fillText(`${hr12} ${suffix}`, padX, y + 15);
+    }
+  }
+
+  // Events per day (simple side-by-side column handling for overlaps)
+  days.forEach((d, dayIdx) => {
+    const dayEvents = rawEvents
+      .filter((e) => e.day === d.code)
+      .sort((a, b) => a.startMin - b.startMin);
+    const colBaseX = gridLeft + dayIdx * colW;
+
+    dayEvents.forEach((ev) => {
+      const overlapSibs = dayEvents.filter(
+        (other) => other.startMin < ev.endMin && ev.startMin < other.endMin
+      );
+      const sibIdx = overlapSibs.indexOf(ev);
+      const totalCols = Math.max(1, overlapSibs.length);
+      const w = (colW - 8) / totalCols;
+      const x = colBaseX + 4 + sibIdx * w;
+      const y = gridTop + ((ev.startMin - startHour * 60) / 60) * hourH + 1;
+      const h = Math.max(22, ((ev.endMin - ev.startMin) / 60) * hourH - 2);
+
+      const style = ev.isBlock
+        ? { bg: "#27272a", border: "#71717a", text: "#e4e4e7", sub: "#a1a1aa" }
+        : PALETTE[Math.abs(ev.colorIdx) % PALETTE.length];
+
+      drawRoundedRect(ctx, x, y, w - 2, h, 7);
+      ctx.fillStyle = style.bg;
+      ctx.fill();
+      ctx.strokeStyle = style.border;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x + 6, y + 3, w - 12, h - 6);
+      ctx.clip();
+
+      ctx.fillStyle = style.text;
+      ctx.font = "bold 12px system-ui, -apple-system, sans-serif";
+      ctx.fillText(ev.title, x + 7, y + 16);
+
+      if (h >= 34) {
+        ctx.fillStyle = style.sub;
+        ctx.font = "11px system-ui, -apple-system, sans-serif";
+        ctx.fillText(ev.subtitle, x + 7, y + 30);
+      }
+      if (h >= 50 && ev.room) {
+        ctx.fillStyle = style.sub;
+        ctx.font = "10px system-ui, -apple-system, sans-serif";
+        ctx.fillText(ev.room, x + 7, y + 44);
+      }
+      ctx.restore();
+    });
+  });
+
+  // Footer watermark
+  ctx.fillStyle = "#52525b";
+  ctx.font = "11px system-ui, -apple-system, sans-serif";
+  ctx.fillText("Generated by ClassSniper Cornell Scheduler", padX, height - 16);
+
+  const safeSlug = schedule.schedule.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "schedule";
+  const link = document.createElement("a");
+  link.download = `${safeSlug}-${schedule.schedule.roster}.png`;
+  link.href = canvas.toDataURL("image/png");
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}

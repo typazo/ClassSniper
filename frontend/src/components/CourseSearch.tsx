@@ -3,29 +3,36 @@ import {
   AlertTriangle,
   BellPlus,
   BookMarked,
+  CalendarCheck2,
   CalendarPlus,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  Filter,
   GraduationCap,
   ListChecks,
   Loader2,
   Lock,
   MapPin,
   Search,
+  X,
 } from "lucide-react";
 import { api } from "../api/client";
 import type {
+  AttributeOption,
+  AttrMatchMode,
   CatalogStatus,
   CatalogSubjectRefreshedSSE,
   CourseCSBadge,
   CourseInsights,
+  CourseSearchPreset,
   CourseSection,
   CourseSummary,
   CSCurriculumMode,
   CSRequirementMode,
+  HydratedSchedule,
   IlrMatchMode,
   IlrSummaryResponse,
   MajorMode,
@@ -34,6 +41,7 @@ import type {
   Subject,
   User,
 } from "../types";
+import { evaluateCourseFitsSchedule } from "../utils/schedulerSolver";
 import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
 import { CourseInsightsPanel } from "./CourseInsightsPanel";
 import { IlrDistributionExplorer, ilrToneClasses } from "./IlrDistributionExplorer";
@@ -50,6 +58,7 @@ type StatusFilter = "all" | "open" | "closed" | "waitlist";
 const CS_REQUIREMENT_MODES: Array<{ id: CSRequirementMode; label: string; hint: string }> = [
   { id: "", label: "All Courses", hint: "Full Cornell catalog" },
   { id: "cs_elective", label: "CS Electives", hint: "4000+ CS (≥3 cr, letter)" },
+  { id: "cs_project", label: "CS Project", hint: "4xx1 Practicum / Project" },
   { id: "tech_elective", label: "Technical Electives", hint: "3000+ w/ qualifying prereqs" },
   { id: "external_spec", label: "External Spec (3000+)", hint: "Non-CS topic area" },
 ];
@@ -97,6 +106,9 @@ function formatBadgeTone(badge: CourseCSBadge): string {
 interface Props {
   user: User;
   lastCatalogRefresh?: CatalogSubjectRefreshedSSE | null;
+  searchPreset?: CourseSearchPreset | null;
+  onClearSearchPreset?: () => void;
+  onOpenChecklist?: (roster?: string) => void;
   onUserUpdated?: (user: User) => void;
   onWatchCreated: () => void;
   onJumpToScheduler?: () => void;
@@ -111,6 +123,7 @@ interface WatchDraft {
   autoPause: boolean;
   cooldownSec: number;
   priority: number;
+  groupKey: string;
 }
 
 interface SearchOverride {
@@ -118,6 +131,7 @@ interface SearchOverride {
   query?: string;
   subjects?: string[];
   levelMin?: number | null;
+  minCredits?: number | null;
   csRequirement?: CSRequirementMode;
   include2000TE?: boolean;
   includeResearchTE?: boolean;
@@ -125,6 +139,8 @@ interface SearchOverride {
   ilrCodes?: string[];
   ilrMatch?: IlrMatchMode;
   ilrMultiOnly?: boolean;
+  attrs?: string[];
+  attrMatch?: AttrMatchMode;
   onlyEligible?: boolean;
   ithacaOrVirtual?: boolean;
   majorMode?: MajorMode;
@@ -138,7 +154,16 @@ function resolveUserMajorMode(u: User): MajorMode {
   return u.show_cs_features === false ? "none" : "cs";
 }
 
-export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchCreated, onJumpToScheduler }: Props) {
+export function CourseSearch({
+  user,
+  lastCatalogRefresh,
+  searchPreset,
+  onClearSearchPreset,
+  onOpenChecklist,
+  onUserUpdated,
+  onWatchCreated,
+  onJumpToScheduler,
+}: Props) {
   const [rosters, setRosters] = useState<Roster[]>([]);
   const [selectedRoster, setSelectedRoster] = useState("");
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -162,6 +187,14 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
   const [syncingIlrPriority, setSyncingIlrPriority] = useState(false);
   const [onlyEligible, setOnlyEligible] = useState(false);
   const [ithacaOrVirtual, setIthacaOrVirtual] = useState(true);
+  const [selectedAttrs, setSelectedAttrs] = useState<string[]>([]);
+  const [attrMatch, setAttrMatch] = useState<AttrMatchMode>("any");
+  const [attrsExpanded, setAttrsExpanded] = useState(false);
+  const [attrOptions, setAttrOptions] = useState<AttributeOption[]>([]);
+  const [minCredits, setMinCredits] = useState<number | null>(null);
+  const [fitsActiveSchedule, setFitsActiveSchedule] = useState(false);
+  const [activeSchedule, setActiveSchedule] = useState<HydratedSchedule | null>(null);
+  const [loadingScheduleFit, setLoadingScheduleFit] = useState(false);
   const [prereqsModalOpen, setPrereqsModalOpen] = useState(false);
 
   const [courses, setCourses] = useState<CourseSummary[]>([]);
@@ -234,7 +267,21 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       .getCatalogStatus(selectedRoster)
       .then((st) => setCatalogStatus(st))
       .catch(() => {});
+    api
+      .getCourseAttributes(selectedRoster)
+      .then((res) => setAttrOptions(res.attributes))
+      .catch(() => {});
   }, [selectedRoster]);
+
+  useEffect(() => {
+    if (!selectedRoster || !fitsActiveSchedule) return;
+    setLoadingScheduleFit(true);
+    api
+      .listSchedules(selectedRoster)
+      .then((res) => setActiveSchedule(res.active))
+      .catch(() => setActiveSchedule(null))
+      .finally(() => setLoadingScheduleFit(false));
+  }, [selectedRoster, fitsActiveSchedule]);
 
   useEffect(() => {
     if (!selectedRoster || !showIlrFeatures) return;
@@ -303,7 +350,10 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       const effIlrCodes = ilrEnabled ? (override?.ilrCodes ?? ilrCodes) : [];
       const effIlrMatch = override?.ilrMatch ?? ilrMatch;
       const effIlrMultiOnly = ilrEnabled ? (override?.ilrMultiOnly ?? ilrMultiOnly) : false;
+      const effAttrs = override?.attrs ?? selectedAttrs;
+      const effAttrMatch = override?.attrMatch ?? attrMatch;
       const lvl = override?.levelMin !== undefined ? override.levelMin : levelMin;
+      const minCr = override?.minCredits !== undefined ? override.minCredits : minCredits;
       const inc2000 = override?.include2000TE ?? include2000TE;
       const incRes = override?.includeResearchTE ?? includeResearchTE;
       const curr = override?.curriculum ?? curriculum;
@@ -312,14 +362,23 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       const silent = Boolean(override?.silent);
       const hasIlrCriteria = effIlrCodes.length > 0 || effIlrMultiOnly;
 
-      if (!q.trim() && subjs.length === 0 && !req && !hasIlrCriteria && !lvl && !eligibleOnly) {
+      if (
+        !q.trim() &&
+        subjs.length === 0 &&
+        !req &&
+        !hasIlrCriteria &&
+        effAttrs.length === 0 &&
+        !lvl &&
+        !minCr &&
+        !eligibleOnly
+      ) {
         if (!silent) {
           setError(
             ilrEnabled
               ? "Pick an ILR distribution code/preset above, select subjects, or enter a keyword or course code."
               : csEnabled
-                ? "Enter a course code, keyword, class #, pick subjects, or select a CS requirement filter."
-                : "Enter a course code, keyword, class #, or pick one or more subjects."
+                ? "Enter a course code, keyword, pick attributes/subjects, or select a CS requirement filter."
+                : "Enter a course code, keyword, class #, pick attributes, or pick subjects."
           );
         }
         return;
@@ -335,6 +394,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         const res = await api.searchCourses(r, q, {
           subjects: subjs,
           level_min: lvl,
+          min_credits: minCr,
           cs_requirement: req,
           include_2000_te: inc2000,
           include_research_te: incRes,
@@ -343,10 +403,12 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
           ilr_match: effIlrMatch,
           ilr_multi_only: effIlrMultiOnly,
           include_ilr: ilrEnabled,
+          attrs: effAttrs,
+          attr_match: effAttrMatch,
           only_eligible: eligibleOnly,
           ithaca_or_virtual: ithVirt,
           refresh_stale: true,
-          limit: req || hasIlrCriteria ? 150 : 100,
+          limit: req || hasIlrCriteria || effAttrs.length > 0 ? 150 : 100,
         });
         setCourses(res.courses);
         if (res.meta) {
@@ -502,13 +564,27 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
     return { all: courses.length, open, closed, waitlist, pending };
   }, [courses]);
 
+  const scheduleFitMap = useMemo(() => {
+    const out = new Map<string, { fits: boolean; compatibleClassNbrs: Set<number> }>();
+    if (!fitsActiveSchedule || !activeSchedule) return out;
+    for (const c of courses) {
+      out.set(courseCacheKey(c), evaluateCourseFitsSchedule(c, activeSchedule));
+    }
+    return out;
+  }, [courses, fitsActiveSchedule, activeSchedule]);
+
   const filteredCourses = useMemo(() => {
-    if (statusFilter === "all") return courses;
-    // Keep stale/loading courses visible with a pending badge until live SSE check resolves
-    return courses.filter(
-      (c) => c.status_is_stale || summarizeStatuses(c.sections)[statusFilter] > 0
-    );
-  }, [courses, statusFilter]);
+    return courses.filter((c) => {
+      if (statusFilter !== "all" && !c.status_is_stale && summarizeStatuses(c.sections)[statusFilter] === 0) {
+        return false;
+      }
+      if (fitsActiveSchedule && activeSchedule) {
+        const fit = scheduleFitMap.get(courseCacheKey(c));
+        if (!fit?.fits) return false;
+      }
+      return true;
+    });
+  }, [courses, statusFilter, fitsActiveSchedule, activeSchedule, scheduleFitMap]);
 
   function handleModeSelect(nextMode: CSRequirementMode) {
     setError("");
@@ -652,6 +728,66 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
     void executeSearch();
   }
 
+  const lastAppliedPresetIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!searchPreset || !selectedRoster) return;
+    if (lastAppliedPresetIdRef.current === searchPreset.id) return;
+    lastAppliedPresetIdRef.current = searchPreset.id;
+
+    const nextQ = searchPreset.q ?? "";
+    const nextSubjs = searchPreset.subjects ?? [];
+    const nextLvl = searchPreset.level_min === "" || searchPreset.level_min === undefined ? null : searchPreset.level_min;
+    const nextMinCr = searchPreset.min_credits === "" || searchPreset.min_credits === undefined ? null : searchPreset.min_credits;
+    const nextReq = searchPreset.cs_requirement ?? "";
+    const nextAttrs = searchPreset.attrs ?? [];
+    const nextAttrMatch = searchPreset.attr_match ?? "any";
+    const nextCurr = searchPreset.curriculum ?? curriculum;
+
+    setQuery(nextQ);
+    setSelectedSubjects(nextSubjs);
+    setLevelMin(nextLvl);
+    setMinCredits(nextMinCr);
+    setCsRequirement(nextReq);
+    setSelectedAttrs(nextAttrs);
+    setAttrMatch(nextAttrMatch);
+    if (nextCurr) setCurriculum(nextCurr);
+    if (nextAttrs.length > 0) setAttrsExpanded(true);
+
+    void executeSearch({
+      query: nextQ,
+      subjects: nextSubjs,
+      levelMin: nextLvl,
+      minCredits: nextMinCr,
+      csRequirement: nextReq,
+      attrs: nextAttrs,
+      attrMatch: nextAttrMatch,
+      curriculum: nextCurr,
+      majorMode: nextReq ? "cs" : majorMode,
+    });
+  }, [searchPreset, selectedRoster, curriculum, majorMode, executeSearch]);
+
+  function handleToggleAttr(code: string) {
+    const nextAttrs = selectedAttrs.includes(code)
+      ? selectedAttrs.filter((a) => a !== code)
+      : [...selectedAttrs, code];
+    setSelectedAttrs(nextAttrs);
+    if (
+      nextAttrs.length > 0 ||
+      query.trim() ||
+      selectedSubjects.length > 0 ||
+      csRequirement ||
+      ilrCodes.length > 0 ||
+      levelMin ||
+      minCredits
+    ) {
+      void executeSearch({ attrs: nextAttrs });
+    } else {
+      setCourses([]);
+      setSearchMeta(null);
+      hasSearchedRef.current = false;
+    }
+  }
+
   function openSectionDraft(course: CourseSummary, section: CourseSection) {
     const hasLinkedComp = section.components_required.length > 1;
     setDraft({
@@ -663,6 +799,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       autoPause: false,
       cooldownSec: 60,
       priority: user.role === "admin" ? 2 : 1,
+      groupKey: "",
     });
   }
 
@@ -676,6 +813,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
       autoPause: false,
       cooldownSec: 60,
       priority: user.role === "admin" ? 2 : 1,
+      groupKey: "",
     });
   }
 
@@ -698,6 +836,7 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
         auto_pause: draft.autoPause,
         cooldown_sec: draft.cooldownSec,
         ithaca_or_virtual: draft.mode === "any_section" ? ithacaOrVirtual : false,
+        group_key: draft.groupKey.trim(),
       });
       setSuccessMsg(
         `Armed watch for ${draft.course.subject} ${draft.course.catalog_nbr}${
@@ -1078,8 +1217,205 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                 <MapPin className={`h-3.5 w-3.5 ${ithacaOrVirtual ? "text-emerald-400" : "text-amber-300"}`} />
                 <span>{ithacaOrVirtual ? "Ithaca + Virtual Only" : "All Locations (incl. Cornell Tech)"}</span>
               </button>
+
+              <button
+                type="button"
+                onClick={() => setFitsActiveSchedule((v) => !v)}
+                aria-pressed={fitsActiveSchedule}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  fitsActiveSchedule
+                    ? "border-sky-500/60 bg-sky-500/20 text-sky-100"
+                    : "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-sky-500/40"
+                }`}
+                title="Only show courses that have a conflict-free section combination fitting your active schedule"
+              >
+                {loadingScheduleFit ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <CalendarCheck2 className={`h-3.5 w-3.5 ${fitsActiveSchedule ? "text-sky-300" : "text-zinc-400"}`} />
+                )}
+                <span>
+                  Fits Active Schedule
+                  {fitsActiveSchedule && activeSchedule ? ` (${activeSchedule.schedule.name})` : ""}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAttrsExpanded((v) => !v)}
+                aria-expanded={attrsExpanded}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  selectedAttrs.length > 0
+                    ? "border-violet-500/60 bg-violet-500/20 text-violet-100"
+                    : "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-violet-500/40"
+                }`}
+                title="Filter by A&S, Engineering, CALS distribution requirements, FWS, Language, or PE"
+              >
+                <Filter className="h-3.5 w-3.5 text-violet-300" />
+                <span>
+                  Distributions &amp; Attrs{selectedAttrs.length > 0 ? ` (${selectedAttrs.length})` : ""}
+                </span>
+              </button>
+
+              {showCsFeatures && onOpenChecklist && (
+                <button
+                  type="button"
+                  onClick={() => onOpenChecklist(selectedRoster)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-200 hover:bg-emerald-500/20"
+                  title="Open Interactive CS Checklist (A&S / Engineering)"
+                >
+                  <GraduationCap className="h-3.5 w-3.5 text-emerald-400" />
+                  CS Checklist
+                </button>
+              )}
             </div>
           </div>
+
+          {(attrsExpanded || selectedAttrs.length > 0) && (
+            <div className="w-full space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-950/85 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-violet-300">
+                  <Filter className="h-3.5 w-3.5" />
+                  <span>Distribution &amp; College Attributes</span>
+                </div>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <div className="inline-flex rounded-lg border border-zinc-700 bg-zinc-900 p-0.5">
+                    {(["any", "all"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => {
+                          setAttrMatch(m);
+                          if (selectedAttrs.length > 0) {
+                            void executeSearch({ attrMatch: m });
+                          }
+                        }}
+                        className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                          attrMatch === m ? "bg-violet-500 text-zinc-950" : "text-zinc-400 hover:text-white"
+                        }`}
+                      >
+                        Match {m.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedAttrs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedAttrs([]);
+                        if (query.trim() || selectedSubjects.length > 0 || csRequirement || ilrCodes.length > 0 || levelMin) {
+                          void executeSearch({ attrs: [] });
+                        } else {
+                          setCourses([]);
+                          setSearchMeta(null);
+                        }
+                      }}
+                      className="text-zinc-400 hover:text-white"
+                    >
+                      Clear attrs
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Arts &amp; Sciences (A&amp;S) + College
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(attrOptions.length > 0
+                    ? attrOptions.filter((o) => o.group === "as_dist" || o.group === "college")
+                    : [
+                        "ALC-AS",
+                        "BIO-AS",
+                        "ETM-AS",
+                        "GLC-AS",
+                        "HST-AS",
+                        "PHS-AS",
+                        "SCD-AS",
+                        "SSC-AS",
+                        "SDS-AS",
+                        "SMR-AS",
+                        "FWS",
+                        "LANG",
+                        "PE",
+                      ].map((code) => ({ code, label: code, group: "as_dist", count: 0 }))
+                  ).map((opt) => {
+                    const active = selectedAttrs.includes(opt.code);
+                    const displayCode = opt.code === "HST-AS" ? "HIST-AS" : opt.code;
+                    return (
+                      <button
+                        key={opt.code}
+                        type="button"
+                        title={opt.label}
+                        onClick={() => handleToggleAttr(opt.code)}
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                          active
+                            ? "border-violet-400 bg-violet-500/25 text-white"
+                            : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-violet-500/40"
+                        }`}
+                      >
+                        <span>{displayCode}</span>
+                        {opt.count > 0 && (
+                          <span className="text-[10px] text-zinc-500">{opt.count}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Engineering / CALS / Exploratory
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {attrOptions
+                    .filter((o) => o.group === "eng_cals" || o.group === "exploratory")
+                    .map((opt) => {
+                      const active = selectedAttrs.includes(opt.code);
+                      return (
+                        <button
+                          key={opt.code}
+                          type="button"
+                          title={opt.label}
+                          onClick={() => handleToggleAttr(opt.code)}
+                          className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                            active
+                              ? "border-sky-400 bg-sky-500/25 text-white"
+                              : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-sky-500/40"
+                          }`}
+                        >
+                          <span>{opt.code}</span>
+                          {opt.count > 0 && (
+                            <span className="text-[10px] text-zinc-500">{opt.count}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {searchPreset && (
+            <div className="flex w-full items-center justify-between gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-200">
+              <span>
+                Searching from CS Checklist:{" "}
+                <strong>{searchPreset.label || "Selected Empty Requirements"}</strong>
+              </span>
+              {onClearSearchPreset && (
+                <button
+                  type="button"
+                  onClick={onClearSearchPreset}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-emerald-300 hover:bg-emerald-500/20"
+                >
+                  <X className="h-3 w-3" />
+                  Dismiss
+                </button>
+              )}
+            </div>
+          )}
 
           {showCsFeatures && (
             <div className="text-[11px] text-zinc-500">
@@ -1349,6 +1685,27 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                             {badge.label}
                           </span>
                         ))}
+
+                      {course.crse_attrs &&
+                        course.crse_attrs.slice(0, 4).map((attr) => (
+                          <span
+                            key={attr}
+                            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
+                              selectedAttrs.includes(attr)
+                                ? "border-violet-400/60 bg-violet-500/20 text-violet-200"
+                                : "border-zinc-700/80 bg-zinc-900/90 text-zinc-400"
+                            }`}
+                          >
+                            {attr === "HST-AS" ? "HIST-AS" : attr}
+                          </span>
+                        ))}
+
+                      {fitsActiveSchedule && scheduleFitMap.get(cacheKey)?.fits && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-200">
+                          <CalendarCheck2 className="h-2.5 w-2.5" />
+                          Fits Schedule
+                        </span>
+                      )}
 
                       {showIlrFeatures &&
                         course.ilr_eligibility?.badges.map((badge) => (
@@ -1666,6 +2023,13 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                                       {virtualLabel}
                                     </span>
                                   )}
+                                  {fitsActiveSchedule &&
+                                    scheduleFitMap.get(cacheKey)?.compatibleClassNbrs.has(sec.class_nbr) && (
+                                      <span className="inline-flex items-center gap-0.5 rounded-md border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-200">
+                                        <Check className="h-2.5 w-2.5" />
+                                        Fits
+                                      </span>
+                                    )}
                                 </div>
                                 <div className="text-xs text-zinc-400">
                                   {sec.meetings_summary} &middot; {sec.instructors_summary}
@@ -1818,6 +2182,20 @@ export function CourseSearch({ user, lastCatalogRefresh, onUserUpdated, onWatchC
                 className="accent-emerald-500"
               />
             </label>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-300">
+                Pick-1 Group (optional)
+              </label>
+              <input
+                type="text"
+                maxLength={48}
+                value={draft.groupKey}
+                onChange={(e) => setDraft({ ...draft, groupKey: e.target.value })}
+                placeholder="e.g. FWS Pick 1 — pauses sibling watches when 1 opens"
+                className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-500"
+              />
+            </div>
 
             <div className="flex justify-end gap-2 pt-2">
               <button

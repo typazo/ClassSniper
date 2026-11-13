@@ -15,6 +15,12 @@ import orjson
 from app.db import Database, build_fts_query
 from app.providers.base import AvailabilityProvider, CourseRecord, RateLimitedError, UpstreamUnavailableError
 from app.providers.cornell import compute_course_derived_fields, is_ithaca_or_virtual_section
+from app.services.attributes import (
+    course_matches_attrs,
+    extract_course_attributes,
+    normalize_attr_code,
+    summarize_roster_attributes,
+)
 from app.services.cs_requirements import (
     PRIORITY_STEM_SUBJECTS,
     CourseEligibility,
@@ -856,6 +862,8 @@ class CatalogSyncService:
             return True
         if cs_requirement == "cs_elective":
             return elig.cs_elective_pre2024 if curriculum == "pre2024" else elig.cs_elective
+        if cs_requirement == "cs_project":
+            return elig.cs_project
         if cs_requirement == "tech_elective":
             if not elig.tech_elective:
                 return False
@@ -1003,6 +1011,8 @@ class CatalogSyncService:
         ilr_match: str = "any",
         ilr_multi_only: bool = False,
         include_ilr: bool = False,
+        attrs: Optional[list[str]] = None,
+        attr_match: str = "any",
         completed_courses: Optional[list[str]] = None,
         only_eligible: bool = False,
         include_implied_prereqs: bool = True,
@@ -1026,6 +1036,8 @@ class CatalogSyncService:
         ilr_filter_list = [c.strip().upper() for c in (ilr_codes or []) if c.strip()]
         ilr_match_mode = "all" if str(ilr_match).strip().lower() == "all" else "any"
         has_ilr_filter = bool(ilr_filter_list or ilr_multi_only)
+        attrs_list = [normalize_attr_code(a) for a in (attrs or []) if normalize_attr_code(a)]
+        attr_match_mode = "all" if str(attr_match).strip().lower() == "all" else "any"
 
         # Hydrate up to INLINE_UNCACHED_HYDRATE_CAP never-synced subjects that are explicitly targeted
         targets_to_check: list[str] = list(subject_list)
@@ -1049,10 +1061,12 @@ class CatalogSyncService:
                 if exists:
                     targets_to_check = [maybe_subj]
 
-        if req_mode == "cs_elective" and not targets_to_check:
+        if req_mode in {"cs_elective", "cs_project", "tech_elective"} and not targets_to_check:
             targets_to_check = ["CS"]
-        elif req_mode == "tech_elective" and not targets_to_check:
-            targets_to_check = ["CS"]
+        elif attrs_list and not targets_to_check:
+            for virtual_subj in ("PE", "ENGRI", "ENGRD"):
+                if virtual_subj in attrs_list:
+                    targets_to_check.append(virtual_subj)
 
         inline_hydrated = 0
         overflow_uncached: list[str] = []
@@ -1079,7 +1093,11 @@ class CatalogSyncService:
             effective_level_min = 3000
 
         fts_expr = build_fts_query(query_clean)
-        sql_limit = 8000 if (req_mode or only_eligible or ithaca_or_virtual or has_ilr_filter) else max(limit, 200)
+        sql_limit = (
+            8000
+            if (req_mode or only_eligible or ithaca_or_virtual or has_ilr_filter or attrs_list)
+            else max(limit, 200)
+        )
 
         where_extra: list[str] = []
         extra_params: list[Any] = []
@@ -1099,7 +1117,7 @@ class CatalogSyncService:
             cm.roster, cm.subject, cm.catalog_nbr, cm.title_short, cm.title_long,
             cm.description, cm.acad_career, cm.acad_group,
             cm.catalog_prereq, cm.catalog_coreq, cm.catalog_forbidden_overlaps,
-            cm.catalog_num, cm.units_min, cm.units_max, cm.has_letter_grade,
+            cm.crse_attrs_json, cm.catalog_num, cm.units_min, cm.units_max, cm.has_letter_grade,
             cm.crosslists_json, cm.components_json, cm.updated_at
         """
 
@@ -1201,6 +1219,17 @@ class CatalogSyncService:
                     )
                 ]
 
+        if attrs_list:
+            courses = [
+                c
+                for c in courses
+                if course_matches_attrs(
+                    extract_course_attributes(c),
+                    attrs_list,
+                    match_mode=attr_match_mode,
+                )
+            ]
+
         prereq_by_course: dict[tuple[str, str], dict[str, Any]] = {
             (c["subject"].upper(), str(c["catalog_nbr"]).upper()): cs_index.evaluate_course_prereqs(
                 c["subject"],
@@ -1300,6 +1329,8 @@ class CatalogSyncService:
             hidden_locs = hidden_by_course.get((su, nbr), [])
             c["crosslists"] = _decode_json_list(c.pop("crosslists_json", "[]"))
             c["components"] = _decode_json_list(c.pop("components_json", "[]"))
+            c["crse_attrs"] = extract_course_attributes(c)
+            c.pop("crse_attrs_json", None)
             c["has_letter_grade"] = bool(c.get("has_letter_grade", 1))
             c["sections"] = sec_by_course.get((su, nbr), [])
             c["hidden_other_location_count"] = len(hidden_locs)
@@ -1352,6 +1383,19 @@ class CatalogSyncService:
                 "implied_courses": implied_courses,
             },
         }
+
+    async def get_attribute_options(self, roster: str) -> list[dict[str, Any]]:
+        """Summarize cached distribution/curriculum attributes available for a roster."""
+        roster_u = roster.upper()
+        rows = await self.db.fetch_all(
+            """
+            SELECT subject, catalog_nbr, title_short, title_long, crse_attrs_json
+            FROM courses_meta
+            WHERE roster = ?
+            """,
+            (roster_u,),
+        )
+        return summarize_roster_attributes(rows)
 
     async def get_prereq_course_options(
         self,

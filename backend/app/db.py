@@ -177,6 +177,9 @@ CREATE TABLE IF NOT EXISTS status_events (
 CREATE INDEX IF NOT EXISTS idx_status_events_time
     ON status_events (detected_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_status_events_target
+    ON status_events (roster, subject, catalog_nbr, class_nbr, detected_at DESC);
+
 CREATE TABLE IF NOT EXISTS delivery_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id INTEGER REFERENCES status_events(id) ON DELETE CASCADE,
@@ -276,6 +279,7 @@ _USERS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("include_implied_prereqs", "INTEGER NOT NULL DEFAULT 1"),
     ("show_cs_features", "INTEGER NOT NULL DEFAULT 1"),
     ("major_mode", "TEXT NOT NULL DEFAULT 'cs'"),
+    ("cs_checklist_json", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 
@@ -301,6 +305,7 @@ _ROSTER_SECTIONS_MIGRATIONS: tuple[tuple[str, str], ...] = (
 
 _WATCHES_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("ithaca_or_virtual", "INTEGER NOT NULL DEFAULT 0"),
+    ("group_key", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -337,6 +342,9 @@ class Database:
         await self._migrate_courses_meta()
         await self._migrate_roster_sections()
         await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watches_group ON watches (user_id, group_key, active)"
+        )
         await self._conn.commit()
 
     async def _ensure_columns(

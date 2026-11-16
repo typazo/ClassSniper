@@ -17,6 +17,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 from app.config import Settings, get_settings
 from app.db import Database
 from app.services.cs_requirements import decode_completed_course_details, decode_completed_courses
+from app.services.minors import decode_minor_prefs
 
 _ph = PasswordHasher()
 
@@ -139,7 +140,7 @@ async def get_current_user(
                completed_courses_json, completed_course_details_json,
                in_progress_courses_json, in_progress_course_details_json,
                include_implied_prereqs, show_cs_features,
-               major_mode, created_at
+               major_mode, minor_prefs_json, created_at
         FROM users
         WHERE id = ?
         """,
@@ -158,6 +159,7 @@ async def get_current_user(
         "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
         "major_mode": mode,
         "show_cs_features": show_cs,
+        "minor_prefs": decode_minor_prefs(user.get("minor_prefs_json")),
     }
 
 

@@ -1512,3 +1512,189 @@ async def test_dedicated_transcript_schedule_locked_and_duplicatable(app_client)
     assert dup_body["schedule"]["is_transcript"] is False
     dup_id = dup_body["schedule"]["id"]
     assert (await admin.post(f"/api/schedules/{dup_id}/courses", json={"subject": "MATH", "catalog_nbr": "2940"})).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_drop_odds_unwatched_recording_and_endpoints(app_client, fake_provider) -> None:
+    from datetime import datetime, timedelta, timezone
+    from app.providers.base import CourseRecord, RosterRecord, SectionRecord
+    from app.services.drop_odds import compute_drop_odds
+
+    app, admin = app_client
+    db = app.state.db
+    await admin.post("/api/auth/bootstrap", json={"username": "tyler", "password": "password123"})
+
+    fake_provider.rosters = [
+        RosterRecord(slug="SP27", descr="Spring 2027", is_default=True, archive_mode=False, strm="2951"),
+        RosterRecord(slug="FA26", descr="Fall 2026", is_default=False, archive_mode=True, strm="2937"),
+    ]
+    await app.state.catalog.sync_rosters_and_subjects()
+
+    # Verify Drop Odds tier classification boundaries cleanly
+    now = datetime(2027, 1, 20, 12, 0, tzinfo=timezone.utc)
+    assert compute_drop_odds([], tracking_days=0.2, now=now)["tier"] == "untracked"
+    assert compute_drop_odds([], tracking_days=1.5, now=now)["tier"] == "none"
+
+    low_ev = [{"id": 1, "class_nbr": 100, "new_status": "O", "detected_at": (now - timedelta(days=10)).isoformat()}]
+    assert compute_drop_odds(low_ev, tracking_days=12.0, now=now)["tier"] == "low"
+
+    mod_evs = [
+        {"id": 1, "class_nbr": 100, "new_status": "O", "detected_at": (now - timedelta(days=2)).isoformat()},
+        {"id": 2, "class_nbr": 100, "new_status": "C", "detected_at": (now - timedelta(days=2) + timedelta(seconds=90)).isoformat()},
+        {"id": 3, "class_nbr": 100, "new_status": "O", "detected_at": (now - timedelta(days=1)).isoformat()},
+    ]
+    mod_odds = compute_drop_odds(mod_evs, tracking_days=5.0, now=now)
+    assert mod_odds["tier"] == "moderate"
+    assert mod_odds["opened_7d"] == 2
+    assert mod_odds["median_open_sec_7d"] == 90.0
+
+    high_evs = [
+        {"id": i + 1, "class_nbr": 200, "new_status": "O", "detected_at": (now - timedelta(hours=i + 1)).isoformat()}
+        for i in range(3)
+    ]
+    assert compute_drop_odds(high_evs, tracking_days=1.0, now=now)["tier"] == "high"
+
+    # Seed SP27 CS with watched CS 4701 AND unwatched CS 3110
+    def make_cs_courses(s3110: str, s4701: str) -> list[CourseRecord]:
+        return [
+            CourseRecord(
+                roster="SP27",
+                subject="CS",
+                catalog_nbr="3110",
+                title_short="Data Structures",
+                title_long="Data Structures and Functional Programming",
+                description="OCaml.",
+                crse_id=71001,
+                acad_career="UG",
+                acad_group="EN",
+                enroll_groups=[{"componentsRequired": ["LEC"], "unitsMinimum": 4, "unitsMaximum": 4}],
+                sections=[
+                    SectionRecord(
+                        class_nbr=31101,
+                        enroll_group_idx=0,
+                        ssr_component="LEC",
+                        section="001",
+                        open_status=s3110,
+                        components_required=["LEC"],
+                    )
+                ],
+            ),
+            CourseRecord(
+                roster="SP27",
+                subject="CS",
+                catalog_nbr="4701",
+                title_short="Practicum in AI",
+                title_long="Practicum in Artificial Intelligence",
+                description="AI.",
+                crse_id=71002,
+                acad_career="UG",
+                acad_group="EN",
+                enroll_groups=[{"componentsRequired": ["LEC"], "unitsMinimum": 2, "unitsMaximum": 2}],
+                sections=[
+                    SectionRecord(
+                        class_nbr=47011,
+                        enroll_group_idx=0,
+                        ssr_component="LEC",
+                        section="001",
+                        open_status=s4701,
+                        components_required=["LEC"],
+                    )
+                ],
+            ),
+        ]
+
+    # 1) Initial catalog sync establishes first_synced_at & baseline section statuses
+    fake_provider.courses_by_bucket[("SP27", "CS")] = make_cs_courses("C", "C")
+    await app.state.catalog.ensure_subject_synced("SP27", "CS", force=True)
+    subj_before = await db.fetch_one("SELECT first_synced_at FROM subjects WHERE roster = 'SP27' AND value = 'CS'")
+    assert subj_before and subj_before["first_synced_at"] is not None
+
+    # 2) Catalog re-sync detects CS 3110 flipping C -> O into status_events and preserves first_synced_at
+    fake_provider.courses_by_bucket[("SP27", "CS")] = make_cs_courses("O", "C")
+    await app.state.catalog.ensure_subject_synced("SP27", "CS", force=True)
+    subj_after = await db.fetch_one("SELECT first_synced_at FROM subjects WHERE roster = 'SP27' AND value = 'CS'")
+    assert subj_after and subj_after["first_synced_at"] == subj_before["first_synced_at"]
+    cat_ev = await db.fetch_all(
+        "SELECT * FROM status_events WHERE roster = 'SP27' AND subject = 'CS' AND catalog_nbr = '3110'"
+    )
+    assert len(cat_ev) == 1
+    assert cat_ev[0]["old_status"] == "C"
+    assert cat_ev[0]["new_status"] == "O"
+    assert cat_ev[0]["poll_rtt_ms"] == 0
+
+    # 3) Archived roster re-sync must NOT log status_events diffs
+    fake_provider.courses_by_bucket[("FA26", "CS")] = [
+        CourseRecord(
+            roster="FA26",
+            subject="CS",
+            catalog_nbr="3110",
+            title_short="Data Structures",
+            title_long="Data Structures",
+            description="OCaml.",
+            crse_id=71001,
+            acad_career="UG",
+            acad_group="EN",
+            enroll_groups=[{"componentsRequired": ["LEC"], "unitsMinimum": 4, "unitsMaximum": 4}],
+            sections=[
+                SectionRecord(
+                    class_nbr=31199,
+                    enroll_group_idx=0,
+                    ssr_component="LEC",
+                    section="001",
+                    open_status="C",
+                    components_required=["LEC"],
+                )
+            ],
+        )
+    ]
+    await app.state.catalog.ensure_subject_synced("FA26", "CS", force=True)
+    fake_provider.courses_by_bucket[("FA26", "CS")][0].sections[0].open_status = "O"
+    await app.state.catalog.ensure_subject_synced("FA26", "CS", force=True)
+    assert await db.fetch_all("SELECT * FROM status_events WHERE roster = 'FA26'") == []
+
+    # 4) Watch ONLY CS 4701, then run poller when UNWATCHED CS 3110 flips O -> C -> O
+    w_res = await admin.post(
+        "/api/watches",
+        json={"roster": "SP27", "subject": "CS", "catalog_nbr": "4701", "class_nbr": 47011, "mode": "exact"},
+    )
+    assert w_res.status_code == 201
+    watch_id = w_res.json()["watch"]["id"]
+
+    await app.state.poller.hydrate_from_db()
+    fake_provider.courses_by_bucket[("SP27", "CS")] = make_cs_courses("C", "C")
+    await app.state.poller.poll_bucket("SP27", "CS")
+    fake_provider.courses_by_bucket[("SP27", "CS")] = make_cs_courses("O", "C")
+    await app.state.poller.poll_bucket("SP27", "CS")
+
+    unwatched_events = await db.fetch_all(
+        "SELECT old_status, new_status FROM status_events WHERE roster = 'SP27' AND subject = 'CS' AND catalog_nbr = '3110' ORDER BY id ASC"
+    )
+    assert [(e["old_status"], e["new_status"]) for e in unwatched_events] == [("C", "O"), ("O", "C"), ("C", "O")]
+
+    # 5) Check Search, Course Detail, WatchList, History, and Telemetry Metrics surface drop_odds & leaderboard
+    search_res = await admin.get("/api/courses/search", params={"roster": "SP27", "subject": "CS", "q": "3110"})
+    assert search_res.status_code == 200
+    cs3110 = search_res.json()["courses"][0]
+    assert cs3110["drop_odds"]["tier"] == "moderate"
+    assert cs3110["drop_odds"]["opened_7d"] == 2
+
+    detail_res = await admin.get("/api/courses/SP27/CS/3110")
+    assert detail_res.status_code == 200
+    assert detail_res.json()["course"]["drop_odds"]["opened_7d"] == 2
+
+    watches_res = await admin.get("/api/watches")
+    assert watches_res.status_code == 200
+    w_item = next(w for w in watches_res.json()["watches"] if w["id"] == watch_id)
+    assert w_item["drop_odds"]["tier"] == "untracked"
+
+    hist_res = await admin.get(f"/api/watches/{watch_id}/history")
+    assert hist_res.status_code == 200
+    assert hist_res.json()["drop_odds"]["tier"] == "untracked"
+
+    metrics_res = await admin.get("/api/metrics")
+    assert metrics_res.status_code == 200
+    lb = metrics_res.json()["drop_leaderboard"]
+    assert len(lb) >= 1
+    assert lb[0]["subject"] == "CS"
+    assert lb[0]["catalog_nbr"] == "3110"
+    assert lb[0]["opened_7d"] == 2

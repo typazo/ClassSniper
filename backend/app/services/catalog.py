@@ -22,6 +22,13 @@ from app.services.attributes import (
     summarize_roster_attributes,
 )
 from app.services.cs_checklist import format_credits_range
+from app.services.drop_odds import fetch_course_drop_odds_map
+from app.services.minors import (
+    build_minors_catalog,
+    course_matches_minor_filter,
+    evaluate_course_for_minor,
+    normalize_course_code as normalize_minor_course_code,
+)
 from app.services.cs_requirements import (
     PRIORITY_STEM_SUBJECTS,
     TRANSCRIPT_EQUIVALENT_CATALOG,
@@ -248,6 +255,22 @@ class CatalogSyncService:
         subject_u = subject.upper()
 
         async with self.db.write_tx() as conn:
+            roster_cur = await conn.execute(
+                "SELECT archive_mode FROM rosters WHERE slug = ?",
+                (roster_u,),
+            )
+            roster_row = await roster_cur.fetchone()
+            is_archived_roster = bool(roster_row and roster_row[0])
+
+            prev_sec_cur = await conn.execute(
+                "SELECT class_nbr, open_status FROM roster_sections WHERE roster = ? AND subject = ?",
+                (roster_u, subject_u),
+            )
+            prev_status_by_nbr: dict[int, str] = {
+                int(r[0]): str(r[1]) for r in await prev_sec_cur.fetchall()
+            }
+            status_flips: list[tuple[Any, ...]] = []
+
             await conn.execute(
                 "DELETE FROM courses_fts WHERE roster = ? AND subject = ?",
                 (roster_u, subject_u),
@@ -316,6 +339,25 @@ class CatalogSyncService:
                 class_nbrs_tokens: list[str] = []
                 for sec in c.sections:
                     class_nbrs_tokens.append(str(sec.class_nbr))
+                    prev_st = prev_status_by_nbr.get(sec.class_nbr)
+                    if (
+                        not is_archived_roster
+                        and prev_st is not None
+                        and prev_st != sec.open_status
+                    ):
+                        sec_lbl = f"{sec.ssr_component} {sec.section}".strip()
+                        status_flips.append(
+                            (
+                                roster_u,
+                                c.subject,
+                                c.catalog_nbr,
+                                sec.class_nbr,
+                                sec_lbl,
+                                prev_st,
+                                sec.open_status,
+                                0,
+                            )
+                        )
                     await conn.execute(
                         """
                         INSERT INTO roster_sections (
@@ -363,12 +405,25 @@ class CatalogSyncService:
                     ),
                 )
 
+            if status_flips:
+                await conn.executemany(
+                    """
+                    INSERT INTO status_events (
+                        roster, subject, catalog_nbr, class_nbr, section_label,
+                        old_status, new_status, poll_rtt_ms
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    status_flips,
+                )
+
             await conn.execute(
                 """
-                INSERT INTO subjects (roster, value, descr, synced_at)
-                VALUES (?, ?, ?, datetime('now'))
+                INSERT INTO subjects (roster, value, descr, synced_at, first_synced_at)
+                VALUES (?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(roster, value) DO UPDATE SET
-                    synced_at = datetime('now')
+                    synced_at = datetime('now'),
+                    first_synced_at = COALESCE(subjects.first_synced_at, datetime('now'))
                 """,
                 (roster_u, subject_u, subject_u),
             )
@@ -1232,6 +1287,11 @@ class CatalogSyncService:
         include_ilr: bool = False,
         attrs: Optional[list[str]] = None,
         attr_match: str = "any",
+        minor: str = "",
+        minor_version: str = "",
+        minor_categories: Optional[list[str]] = None,
+        minor_completed_categories: Optional[list[str]] = None,
+        minor_hide_completed: bool = True,
         completed_courses: Optional[list[str]] = None,
         only_eligible: bool = False,
         include_implied_prereqs: bool = True,
@@ -1257,6 +1317,12 @@ class CatalogSyncService:
         has_ilr_filter = bool(ilr_filter_list or ilr_multi_only)
         attrs_list = [normalize_attr_code(a) for a in (attrs or []) if normalize_attr_code(a)]
         attr_match_mode = "all" if str(attr_match).strip().lower() == "all" else "any"
+        minor_id = str(minor or "").strip().lower()
+        minor_ver = str(minor_version or "").strip().lower()
+        minor_cat_set = {c.strip().lower() for c in (minor_categories or []) if str(c).strip()}
+        minor_done_set = {
+            c.strip().lower() for c in (minor_completed_categories or []) if str(c).strip()
+        }
 
         # Hydrate up to INLINE_UNCACHED_HYDRATE_CAP never-synced subjects that are explicitly targeted
         targets_to_check: list[str] = list(subject_list)
@@ -1314,7 +1380,7 @@ class CatalogSyncService:
         fts_expr = build_fts_query(query_clean)
         sql_limit = (
             8000
-            if (req_mode or only_eligible or ithaca_or_virtual or has_ilr_filter or attrs_list)
+            if (req_mode or only_eligible or ithaca_or_virtual or has_ilr_filter or attrs_list or minor_id)
             else max(limit, 200)
         )
 
@@ -1449,6 +1515,28 @@ class CatalogSyncService:
                 )
             ]
 
+        minor_by_course: dict[tuple[str, str], dict[str, Any]] = {}
+        if minor_id:
+            filtered_minor: list[dict[str, Any]] = []
+            for c in courses:
+                ev = evaluate_course_for_minor(
+                    c,
+                    minor_id,
+                    minor_ver,
+                    completed_categories=minor_done_set,
+                    active_categories=minor_cat_set,
+                )
+                if course_matches_minor_filter(
+                    ev,
+                    selected_categories=minor_cat_set or None,
+                    hide_completed=minor_hide_completed,
+                ):
+                    minor_key = (str(c["subject"]).upper(), str(c["catalog_nbr"]).upper())
+                    if ev is not None:
+                        minor_by_course[minor_key] = ev
+                    filtered_minor.append(c)
+            courses = filtered_minor
+
         prereq_by_course: dict[tuple[str, str], dict[str, Any]] = {
             (c["subject"].upper(), str(c["catalog_nbr"]).upper()): cs_index.evaluate_course_prereqs(
                 c["subject"],
@@ -1541,6 +1629,12 @@ class CatalogSyncService:
             elif raw_code != "ANY_IL":
                 active_ilr_set.add(raw_code)
 
+        drop_odds_map = await fetch_course_drop_odds_map(
+            self.db,
+            roster_u,
+            [(str(c["subject"]), str(c["catalog_nbr"])) for c in courses],
+        )
+
         for c in courses:
             su = str(c["subject"]).upper()
             nbr = str(c["catalog_nbr"])
@@ -1571,8 +1665,11 @@ class CatalogSyncService:
                     if ilr_elig is not None
                     else None
                 )
+            if minor_id:
+                c["minor_eligibility"] = minor_by_course.get((su, nbr))
             c["subject_synced_at"] = eff_iso
             c["status_is_stale"] = not is_fresh
+            c["drop_odds"] = drop_odds_map.get((su, nbr))
 
         queued_subjects: list[str] = []
         if refresh_stale:
@@ -1615,6 +1712,66 @@ class CatalogSyncService:
             (roster_u,),
         )
         return summarize_roster_attributes(rows)
+
+    async def get_minors_catalog(
+        self,
+        roster: str,
+        completed_courses: Optional[list[str]] = None,
+        in_progress_courses: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Return Cornell minor definitions, live roster course counts, and user auto-fill matches."""
+        roster_u = roster.upper()
+        roster_rows = await self.db.fetch_all(
+            """
+            SELECT subject, catalog_nbr, catalog_num, title_short, title_long,
+                   has_letter_grade, units_min, units_max, components_json, crosslists_json
+            FROM courses_meta
+            WHERE roster = ?
+            """,
+            (roster_u,),
+        )
+        meta_by_code: dict[str, dict[str, Any]] = {}
+        for row in roster_rows:
+            code = normalize_minor_course_code(f"{row.get('subject', '')} {row.get('catalog_nbr', '')}")
+            if code:
+                meta_by_code[code] = row
+
+        missing_codes: list[tuple[str, str]] = []
+        for raw_code in [*(completed_courses or []), *(in_progress_courses or [])]:
+            code = normalize_minor_course_code(raw_code)
+            if code and code not in meta_by_code and " " in code:
+                subj, nbr = code.split(" ", 1)
+                missing_codes.append((subj, nbr))
+
+        if missing_codes:
+            pairs_sql = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in missing_codes)
+            params: list[Any] = []
+            for subj, nbr in missing_codes:
+                params.extend((subj, nbr))
+            hist_rows = await self.db.fetch_all(
+                f"""
+                SELECT roster, subject, catalog_nbr, catalog_num, title_short, title_long,
+                       has_letter_grade, units_min, units_max, components_json, crosslists_json
+                FROM courses_meta
+                WHERE {pairs_sql}
+                ORDER BY roster DESC
+                """,
+                tuple(params),
+            )
+            for row in hist_rows:
+                code = normalize_minor_course_code(f"{row.get('subject', '')} {row.get('catalog_nbr', '')}")
+                if code and code not in meta_by_code:
+                    meta_by_code[code] = row
+
+        return {
+            "roster": roster_u,
+            "minors": build_minors_catalog(
+                roster_rows,
+                completed_courses=completed_courses,
+                in_progress_courses=in_progress_courses,
+                meta_by_code=meta_by_code,
+            ),
+        }
 
     async def get_prereq_course_options(
         self,

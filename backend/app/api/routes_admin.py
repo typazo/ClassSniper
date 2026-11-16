@@ -17,6 +17,7 @@ from app.config import Settings, get_settings
 from app.db import Database
 from app.services.catalog import CatalogSyncService
 from app.services.dispatcher import AlertDispatcher
+from app.services.drop_odds import fetch_drop_leaderboard
 from app.services.poller import PollerEngine
 from app.services.sse import SSEHub
 
@@ -64,10 +65,12 @@ async def get_metrics(
         LIMIT 25
         """
     )
+    leaderboard = await fetch_drop_leaderboard(db, limit=12)
     return {
         "poller": poller.get_metrics_snapshot(),
         "catalog": catalog.status,
         "recent_events": events,
+        "drop_leaderboard": leaderboard,
     }
 
 

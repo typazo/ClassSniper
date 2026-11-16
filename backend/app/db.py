@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
     include_implied_prereqs INTEGER NOT NULL DEFAULT 1,
     show_cs_features INTEGER NOT NULL DEFAULT 1,
     major_mode TEXT NOT NULL DEFAULT 'cs',
+    minor_prefs_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS subjects (
     value TEXT NOT NULL,
     descr TEXT NOT NULL,
     synced_at TEXT,
+    first_synced_at TEXT,
     PRIMARY KEY (roster, value)
 );
 
@@ -287,6 +289,7 @@ _USERS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("show_cs_features", "INTEGER NOT NULL DEFAULT 1"),
     ("major_mode", "TEXT NOT NULL DEFAULT 'cs'"),
     ("cs_checklist_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("minor_prefs_json", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 
@@ -317,6 +320,10 @@ _WATCHES_MIGRATIONS: tuple[tuple[str, str], ...] = (
 
 _SCHEDULES_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("is_transcript", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+_SUBJECTS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("first_synced_at", "TEXT"),
 )
 
 
@@ -354,6 +361,10 @@ class Database:
         await self._migrate_roster_sections()
         await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
         await self._ensure_columns("schedules", _SCHEDULES_MIGRATIONS)
+        await self._ensure_columns("subjects", _SUBJECTS_MIGRATIONS)
+        await self.execute(
+            "UPDATE subjects SET first_synced_at = synced_at WHERE first_synced_at IS NULL AND synced_at IS NOT NULL"
+        )
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_watches_group ON watches (user_id, group_key, active)"
         )

@@ -17,6 +17,7 @@ export interface User {
   include_implied_prereqs: boolean;
   major_mode: MajorMode;
   show_cs_features: boolean;
+  minor_prefs?: MinorPrefs;
 }
 
 export interface AuthStatus {
@@ -121,10 +122,38 @@ export interface CourseSummary {
   crse_attrs?: string[];
   cs_eligibility?: CourseCSEligibility;
   ilr_eligibility?: CourseIlrEligibility | null;
+  minor_eligibility?: CourseMinorEligibility | null;
   hidden_other_location_count?: number;
   hidden_other_locations?: string[];
   subject_synced_at?: string | null;
   status_is_stale?: boolean;
+  drop_odds?: DropOddsSummary | null;
+}
+
+export type DropOddsTier = "high" | "moderate" | "low" | "none" | "untracked";
+
+export interface DropOddsSummary {
+  tier: DropOddsTier;
+  label: string;
+  opened_24h: number;
+  opened_7d: number;
+  opened_30d: number;
+  opened_all: number;
+  waitlisted_7d: number;
+  flips_7d: number;
+  flips_all: number;
+  avg_open_sec_7d: number | null;
+  median_open_sec_7d: number | null;
+  last_opened_at: string | null;
+  tracking_days: number;
+  summary: string;
+}
+
+export interface DropLeaderboardEntry extends DropOddsSummary {
+  roster: string;
+  subject: string;
+  catalog_nbr: string;
+  title: string;
 }
 
 export interface CourseIlrBadge {
@@ -150,6 +179,64 @@ export interface CourseIlrEligibility {
   badges: CourseIlrBadge[];
   warnings: string[];
   ug_crosslist_hints: string[];
+}
+
+export interface MinorPrefs {
+  selected_minor: string;
+  versions: Record<string, string>;
+  completed_categories: Record<string, string[]>;
+  hide_completed: boolean;
+}
+
+export interface MinorCategoryCatalog {
+  id: string;
+  label: string;
+  short_label: string;
+  required_summary: string;
+  rule_summary: string;
+  tone: string;
+  roster_count: number;
+  matched_user_courses: string[];
+}
+
+export interface MinorVersionCatalog {
+  id: string;
+  label: string;
+  short_label: string;
+  description: string;
+  total_required_summary: string;
+  roster_count: number;
+  categories: MinorCategoryCatalog[];
+}
+
+export interface MinorCatalogItem {
+  id: string;
+  label: string;
+  short_label: string;
+  department: string;
+  default_version: string;
+  overview: string;
+  versions: MinorVersionCatalog[];
+}
+
+export interface CourseMinorBadge {
+  category_id: string;
+  tone: string;
+  label: string;
+  completed: boolean;
+}
+
+export interface CourseMinorEligibility {
+  minor_id: string;
+  minor_label: string;
+  version_id: string;
+  version_label: string;
+  matched_categories: string[];
+  remaining_categories: string[];
+  covered_by_completed: string[];
+  has_uncompleted: boolean;
+  badges: CourseMinorBadge[];
+  warnings: string[];
 }
 
 export interface IlrBucketCounts {
@@ -365,6 +452,7 @@ export interface Watch {
     avg_open_sec_7d: number | null;
     last_opened_at: string | null;
   };
+  drop_odds?: DropOddsSummary | null;
 }
 
 export type WatchHistoryWindow = "24h" | "7d" | "30d" | "all";
@@ -388,7 +476,7 @@ export interface WatchStatusEventItem {
   section_label: string;
   old_status: string | null;
   new_status: string;
-  poll_rtt_ms: number;
+  poll_rtt_ms: number | null;
   detected_at: string;
 }
 
@@ -396,6 +484,7 @@ export interface WatchHistoryResponse {
   watch_id: number;
   window: WatchHistoryWindow;
   windows: Record<WatchHistoryWindow, WatchTurnoverWindowStats>;
+  drop_odds?: DropOddsSummary | null;
   events: WatchStatusEventItem[];
 }
 
@@ -465,7 +554,7 @@ export interface StatusEventItem {
   section_label: string;
   old_status: string | null;
   new_status: string;
-  poll_rtt_ms: number;
+  poll_rtt_ms: number | null;
   detected_at: string;
 }
 
@@ -478,6 +567,7 @@ export interface MetricsResponse {
     rosters_count: number;
   };
   recent_events: StatusEventItem[];
+  drop_leaderboard?: DropLeaderboardEntry[];
 }
 
 export interface SeatAlertSSE {

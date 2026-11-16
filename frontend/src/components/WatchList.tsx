@@ -19,6 +19,7 @@ import { api } from "../api/client";
 import type { Watch, WatchHistoryResponse, WatchHistoryWindow } from "../types";
 import { getSectionLocationTag, getSectionVirtualLabel } from "../utils/location";
 import { copyText } from "../utils/pwa";
+import { DropOddsBadge, formatDurationSec } from "./DropOddsBadge";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
@@ -33,17 +34,6 @@ const MODE_LABELS: Record<Watch["mode"], string> = {
   linked_group: "Linked Group (LEC+DIS/LAB)",
   any_section: "Any Section",
 };
-
-function formatDurationSec(sec: number | null): string {
-  if (sec === null || sec === undefined) return "—";
-  if (sec < 60) return `${Math.round(sec)}s`;
-  const mins = Math.floor(sec / 60);
-  const rem = Math.round(sec % 60);
-  if (mins < 60) return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  const remMin = mins % 60;
-  return remMin > 0 ? `${hrs}h ${remMin}m` : `${hrs}h`;
-}
 
 export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearch }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
@@ -352,6 +342,7 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                     {w.subject} {w.catalog_nbr}
                   </h3>
                   {secInfo && <StatusBadge status={secInfo.open_status} />}
+                  <DropOddsBadge dropOdds={w.drop_odds} />
                   {secLoc?.isOffCampus && (
                     <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
                       <AlertTriangle className="h-3 w-3 text-amber-300" />
@@ -535,9 +526,11 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                 >
                   <Activity className="h-3 w-3 text-sky-300" />
                   <span>
-                    {w.turnover_summary && w.turnover_summary.all > 0
-                      ? `Activity (${w.turnover_summary.h24}d / ${w.turnover_summary.d7}w)`
-                      : "Activity"}
+                    {w.drop_odds && w.drop_odds.opened_7d > 0
+                      ? `Drop Odds · ${w.drop_odds.label}`
+                      : w.turnover_summary && w.turnover_summary.all > 0
+                        ? `Drop Odds (${w.turnover_summary.all})`
+                        : "Drop Odds"}
                   </span>
                 </button>
                 <button
@@ -624,24 +617,44 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                         const hist = historyDataById[w.id];
                         const curWin = historyWindowById[w.id] || hist.window;
                         const stats = hist.windows[curWin];
+                        const odds = hist.drop_odds || w.drop_odds;
                         return (
-                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                              <div className="text-[10px] text-zinc-400">Total Flips</div>
-                              <div className="text-sm font-bold text-white">{stats.total_flips}</div>
-                            </div>
-                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                              <div className="text-[10px] text-zinc-400">Opened (O)</div>
-                              <div className="text-sm font-bold text-emerald-300">{stats.opened_count}</div>
-                            </div>
-                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                              <div className="text-[10px] text-zinc-400">Closed (C)</div>
-                              <div className="text-sm font-bold text-rose-300">{stats.closed_count}</div>
-                            </div>
-                            <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                              <div className="text-[10px] text-zinc-400">Avg Open Window</div>
-                              <div className="text-sm font-bold text-sky-200">
-                                {formatDurationSec(stats.avg_open_sec)}
+                          <div className="space-y-2">
+                            {odds && (
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
+                                <span>{odds.summary}</span>
+                                <span>
+                                  Tracked {odds.tracking_days.toFixed(1)}d
+                                  {odds.last_opened_at
+                                    ? ` · Last open ${new Date(odds.last_opened_at).toLocaleString()}`
+                                    : ""}
+                                </span>
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                                <div className="text-[10px] text-zinc-400">Total Flips</div>
+                                <div className="text-sm font-bold text-white">{stats.total_flips}</div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                                <div className="text-[10px] text-zinc-400">Opened (O)</div>
+                                <div className="text-sm font-bold text-emerald-300">{stats.opened_count}</div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                                <div className="text-[10px] text-zinc-400">Closed (C)</div>
+                                <div className="text-sm font-bold text-rose-300">{stats.closed_count}</div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                                <div className="text-[10px] text-zinc-400">Avg Open Window</div>
+                                <div className="text-sm font-bold text-sky-200">
+                                  {formatDurationSec(stats.avg_open_sec)}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                                <div className="text-[10px] text-zinc-400">Median Open</div>
+                                <div className="text-sm font-bold text-emerald-200">
+                                  {formatDurationSec(stats.median_open_sec)}
+                                </div>
                               </div>
                             </div>
                           </div>

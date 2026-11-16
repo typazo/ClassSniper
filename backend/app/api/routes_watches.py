@@ -14,6 +14,12 @@ from app.auth import get_current_user, get_db
 from app.config import Settings, get_settings
 from app.db import Database
 from app.services.catalog import CatalogSyncService
+from app.services.drop_odds import (
+    compute_drop_odds,
+    compute_tracking_days,
+    compute_window_stats,
+    parse_event_dt,
+)
 from app.services.poller import PollerEngine, _is_linked_group_ready, _target_statuses
 from app.providers.base import SectionRecord
 from app.providers.cornell import is_ithaca_or_virtual_section
@@ -27,19 +33,6 @@ def get_poller(request: Request) -> PollerEngine:
 
 def get_catalog(request: Request) -> CatalogSyncService:
     return request.app.state.catalog
-
-
-def _parse_event_dt(raw: Any) -> Optional[datetime]:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def _filter_events_for_watch(watch: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -60,77 +53,35 @@ def _filter_events_for_watch(watch: dict[str, Any], events: list[dict[str, Any]]
     return out
 
 
-def _compute_window_stats(events: list[dict[str, Any]], cutoff: Optional[datetime]) -> dict[str, Any]:
-    scoped = []
-    for ev in events:
-        dt = _parse_event_dt(ev.get("detected_at"))
-        if dt is None:
-            continue
-        if cutoff is not None and dt < cutoff:
-            continue
-        scoped.append((dt, ev))
-
-    # Chronological order for open-window duration pairing
-    chrono = sorted(scoped, key=lambda pair: pair[0])
-    open_started: dict[int, datetime] = {}
-    durations_sec: list[float] = []
-    opened_count = 0
-    waitlisted_count = 0
-    closed_count = 0
-    last_opened_at: Optional[str] = None
-
-    for dt, ev in chrono:
-        new_st = str(ev.get("new_status") or "").upper()
-        cls_nbr = int(ev["class_nbr"])
-        if new_st == "O":
-            opened_count += 1
-            open_started[cls_nbr] = dt
-            last_opened_at = dt.isoformat()
-        elif new_st == "W":
-            waitlisted_count += 1
-        elif new_st == "C":
-            closed_count += 1
-
-        if new_st != "O" and cls_nbr in open_started:
-            dur = (dt - open_started.pop(cls_nbr)).total_seconds()
-            if dur >= 0:
-                durations_sec.append(dur)
-
-    avg_open_sec = round(sum(durations_sec) / len(durations_sec), 1) if durations_sec else None
-    median_open_sec = None
-    if durations_sec:
-        s_durs = sorted(durations_sec)
-        mid = len(s_durs) // 2
-        median_open_sec = round(
-            s_durs[mid] if len(s_durs) % 2 == 1 else (s_durs[mid - 1] + s_durs[mid]) / 2.0,
-            1,
-        )
-
-    return {
-        "total_flips": len(scoped),
-        "opened_count": opened_count,
-        "waitlisted_count": waitlisted_count,
-        "closed_count": closed_count,
-        "avg_open_sec": avg_open_sec,
-        "median_open_sec": median_open_sec,
-        "last_opened_at": last_opened_at,
-    }
-
-
 async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not rows:
         return []
 
     course_keys = sorted({(str(w["roster"]), str(w["subject"]), str(w["catalog_nbr"])) for w in rows})
     events_by_course: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    first_synced_by_subj: dict[tuple[str, str], Optional[str]] = {}
     if course_keys:
+        subj_keys = sorted({(r, s) for r, s, _ in course_keys})
+        subj_ph = " OR ".join("(roster = ? AND value = ?)" for _ in subj_keys)
+        subj_params: list[Any] = []
+        for r, s in subj_keys:
+            subj_params.extend([r, s])
+        subj_rows = await db.fetch_all(
+            f"SELECT roster, value, first_synced_at, synced_at FROM subjects WHERE {subj_ph}",
+            subj_params,
+        )
+        for sr in subj_rows:
+            first_synced_by_subj[(str(sr["roster"]), str(sr["value"]))] = (
+                sr.get("first_synced_at") or sr.get("synced_at")
+            )
+
         placeholders = " OR ".join("(roster = ? AND subject = ? AND catalog_nbr = ?)" for _ in course_keys)
         params: list[Any] = []
         for r, s, c in course_keys:
             params.extend([r, s, c])
         ev_rows = await db.fetch_all(
             f"""
-            SELECT roster, subject, catalog_nbr, class_nbr, section_label,
+            SELECT id, roster, subject, catalog_nbr, class_nbr, section_label,
                    old_status, new_status, detected_at
             FROM status_events
             WHERE {placeholders}
@@ -283,10 +234,10 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
             item,
             events_by_course.get((str(w["roster"]), str(w["subject"]), str(w["catalog_nbr"])), []),
         )
-        s24 = _compute_window_stats(course_events, c_24h)
-        s7 = _compute_window_stats(course_events, c_7d)
-        s30 = _compute_window_stats(course_events, c_30d)
-        s_all = _compute_window_stats(course_events, None)
+        s24 = compute_window_stats(course_events, c_24h)
+        s7 = compute_window_stats(course_events, c_7d)
+        s30 = compute_window_stats(course_events, c_30d)
+        s_all = compute_window_stats(course_events, None)
         item["turnover_summary"] = {
             "h24": s24["total_flips"],
             "d7": s7["total_flips"],
@@ -297,6 +248,13 @@ async def _enrich_watches(db: Database, rows: list[dict[str, Any]]) -> list[dict
             "avg_open_sec_7d": s7["avg_open_sec"],
             "last_opened_at": s_all["last_opened_at"],
         }
+        tracking_days = compute_tracking_days(
+            first_synced_by_subj.get((str(w["roster"]), str(w["subject"]))),
+            course_events,
+            fallback_since=w.get("created_at"),
+            now=now_dt,
+        )
+        item["drop_odds"] = compute_drop_odds(course_events, tracking_days=tracking_days, now=now_dt)
         enriched.append(item)
     return enriched
 
@@ -676,14 +634,26 @@ async def get_watch_history(
         "all": None,
     }
     windows = {
-        key: _compute_window_stats(matching, cutoff)
+        key: compute_window_stats(matching, cutoff)
         for key, cutoff in cutoffs.items()
     }
+
+    subj_row = await db.fetch_one(
+        "SELECT first_synced_at, synced_at FROM subjects WHERE roster = ? AND value = ?",
+        (watch["roster"], watch["subject"]),
+    )
+    tracking_days = compute_tracking_days(
+        (subj_row or {}).get("first_synced_at") or (subj_row or {}).get("synced_at"),
+        matching,
+        fallback_since=watch.get("created_at"),
+        now=now_dt,
+    )
+    drop_odds = compute_drop_odds(matching, tracking_days=tracking_days, now=now_dt)
 
     selected_cutoff = cutoffs[window]
     filtered_events: list[dict[str, Any]] = []
     for ev in matching:
-        dt = _parse_event_dt(ev.get("detected_at"))
+        dt = parse_event_dt(ev.get("detected_at"))
         if dt is None:
             continue
         if selected_cutoff is not None and dt < selected_cutoff:
@@ -701,5 +671,6 @@ async def get_watch_history(
         "watch_id": watch_id,
         "window": window,
         "windows": windows,
+        "drop_odds": drop_odds,
         "events": filtered_events,
     }

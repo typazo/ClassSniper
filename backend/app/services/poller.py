@@ -361,12 +361,6 @@ class PollerEngine:
         changed_sections: list[tuple[int, str]] = []
         raw_flips: list[tuple[str, int, str, str, str]] = []
 
-        watched_cat_rows = await self.db.fetch_all(
-            "SELECT DISTINCT catalog_nbr FROM watches WHERE roster = ? AND subject = ?",
-            (roster_u, subject_u),
-        )
-        watched_catalogs = {str(r["catalog_nbr"]) for r in watched_cat_rows}
-
         for course in courses:
             for sec in course.sections:
                 key = (roster_u, sec.class_nbr)
@@ -379,7 +373,7 @@ class PollerEngine:
 
                 if prev_val != sec.open_status:
                     changed_sections.append((sec.class_nbr, sec.open_status))
-                    if prev_val is not None and course.catalog_nbr in watched_catalogs:
+                    if prev_val is not None:
                         sec_lbl = f"{sec.ssr_component} {sec.section}".strip()
                         raw_flips.append((course.catalog_nbr, sec.class_nbr, sec_lbl, prev_val, sec.open_status))
                 self.section_status[key] = sec.open_status

@@ -1,6 +1,7 @@
 import React from "react";
-import { Activity, AlertTriangle, Clock, Gauge } from "lucide-react";
+import { Activity, AlertTriangle, Clock, Gauge, TrendingUp } from "lucide-react";
 import type { MetricsResponse, PollerMetrics } from "../types";
+import { DropOddsBadge } from "./DropOddsBadge";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
 export function TelemetryPanel({ metrics, livePoller, sseConnected }: Props) {
   const poller = livePoller || metrics?.poller;
   const events = metrics?.recent_events || [];
+  const leaderboard = metrics?.drop_leaderboard || [];
 
   if (!poller) {
     return (
@@ -118,6 +120,46 @@ export function TelemetryPanel({ metrics, livePoller, sseConnected }: Props) {
       </div>
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="h-4 w-4 text-emerald-400" />
+            <h3 className="text-sm font-semibold text-white">7-Day Drop Odds Leaderboard</h3>
+          </div>
+          <span className="text-xs text-zinc-400">
+            Observed across polled subjects &amp; catalog refreshes
+          </span>
+        </div>
+        {leaderboard.length === 0 ? (
+          <p className="text-xs text-zinc-500">
+            No multi-day seat turnover recorded yet. Keep watches active to populate drop statistics.
+          </p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {leaderboard.map((item) => (
+              <div
+                key={`${item.roster}-${item.subject}-${item.catalog_nbr}`}
+                className="flex flex-col justify-between gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-bold text-white">
+                      {item.roster} · {item.subject} {item.catalog_nbr}
+                    </div>
+                    {item.title && <div className="truncate text-[11px] text-zinc-400">{item.title}</div>}
+                  </div>
+                  <DropOddsBadge dropOdds={item} compact />
+                </div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                  <span>{item.summary}</span>
+                  <span>{item.flips_7d} flips</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
         <h3 className="mb-3 text-sm font-semibold text-white">Recent Availability Transitions</h3>
         {events.length === 0 ? (
           <p className="text-xs text-zinc-500">No transitions detected yet.</p>
@@ -137,7 +179,8 @@ export function TelemetryPanel({ metrics, livePoller, sseConnected }: Props) {
                   <StatusBadge status={ev.new_status} />
                 </div>
                 <div className="text-zinc-500">
-                  {ev.poll_rtt_ms}ms RTT &middot; {new Date(ev.detected_at).toLocaleString()}
+                  {ev.poll_rtt_ms != null && ev.poll_rtt_ms > 0 ? `${ev.poll_rtt_ms}ms RTT` : "Catalog refresh"} &middot;{" "}
+                  {new Date(ev.detected_at).toLocaleString()}
                 </div>
               </div>
             ))}

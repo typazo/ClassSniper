@@ -157,6 +157,7 @@ class CompletedPrereqsRequest(BaseModel):
 class UserPreferencesRequest(BaseModel):
     major_mode: Optional[Literal["none", "cs", "ilr"]] = None
     show_cs_features: Optional[bool] = None
+    minor_prefs: Optional[dict[str, Any]] = None
 
 
 class CreateScheduleRequest(BaseModel):

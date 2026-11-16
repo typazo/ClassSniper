@@ -20,6 +20,8 @@ import type {
   InviteItem,
   MajorMode,
   MetricsResponse,
+  MinorCatalogItem,
+  MinorPrefs,
   NotifyPreferences,
   PrereqCourseOption,
   Roster,
@@ -90,7 +92,11 @@ export const api = {
       body: JSON.stringify({ invite_code, username, password }),
     }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
-  updateUserPreferences: (patch: { major_mode?: MajorMode; show_cs_features?: boolean }) =>
+  updateUserPreferences: (patch: {
+    major_mode?: MajorMode;
+    show_cs_features?: boolean;
+    minor_prefs?: MinorPrefs;
+  }) =>
     request<{ user: User }>("/api/auth/preferences", {
       method: "PUT",
       body: JSON.stringify(patch),
@@ -117,6 +123,11 @@ export const api = {
       include_ilr?: boolean;
       attrs?: string[];
       attr_match?: AttrMatchMode;
+      minor?: string;
+      minor_version?: string;
+      minor_categories?: string[];
+      minor_completed?: string[];
+      minor_hide_completed?: boolean;
       only_eligible?: boolean;
       include_implied_prereqs?: boolean;
       ithaca_or_virtual?: boolean;
@@ -153,6 +164,17 @@ export const api = {
       params.set("attrs", options.attrs.join(","));
     }
     if (options?.attr_match) params.set("attr_match", options.attr_match);
+    if (options?.minor) params.set("minor", options.minor);
+    if (options?.minor_version) params.set("minor_version", options.minor_version);
+    if (options?.minor_categories && options.minor_categories.length > 0) {
+      params.set("minor_categories", options.minor_categories.join(","));
+    }
+    if (options?.minor_completed !== undefined) {
+      params.set("minor_completed", options.minor_completed.join(","));
+    }
+    if (options?.minor_hide_completed !== undefined) {
+      params.set("minor_hide_completed", String(options.minor_hide_completed));
+    }
     if (options?.only_eligible !== undefined) {
       params.set("only_eligible", String(options.only_eligible));
     }
@@ -173,6 +195,10 @@ export const api = {
   getCourseAttributes: (roster: string) =>
     request<{ roster: string; attributes: AttributeOption[] }>(
       `/api/courses/attributes?roster=${encodeURIComponent(roster)}`
+    ),
+  getMinorsCatalog: (roster?: string) =>
+    request<{ roster: string; minors: MinorCatalogItem[] }>(
+      `/api/minors/catalog${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`
     ),
   getCsChecklist: (roster?: string) =>
     request<CsChecklistPayload>(

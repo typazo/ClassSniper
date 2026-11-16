@@ -22,6 +22,7 @@ from app.db import Database
 from app.services.attributes import extract_course_attributes
 from app.services.catalog import CatalogSyncService
 from app.services.cs_checklist import build_cs_checklist_payload, merge_transcript_into_user_checklist
+from app.services.drop_odds import fetch_course_drop_odds_map
 from app.services.cs_requirements import (
     decode_completed_course_details,
     decode_completed_courses,
@@ -129,6 +130,11 @@ async def search_courses(
     include_ilr: bool = Query(default=False),
     attrs: str = Query(default="", max_length=200),
     attr_match: Literal["any", "all"] = Query(default="any"),
+    minor: str = Query(default="", max_length=40),
+    minor_version: str = Query(default="", max_length=60),
+    minor_categories: str = Query(default="", max_length=400),
+    minor_completed: Optional[str] = Query(default=None, max_length=400),
+    minor_hide_completed: Optional[bool] = Query(default=None),
     only_eligible: bool = Query(default=False),
     include_implied_prereqs: Optional[bool] = Query(default=None),
     ithaca_or_virtual: bool = Query(default=True),
@@ -145,6 +151,33 @@ async def search_courses(
 
     parsed_ilr_codes = [c.strip().upper() for c in ilr_codes.split(",") if c.strip()]
     parsed_attrs = [c.strip().upper() for c in attrs.split(",") if c.strip()]
+    minor_id = minor.strip().lower()
+    user_minor_prefs = user.get("minor_prefs") or {}
+    saved_versions = user_minor_prefs.get("versions") or {}
+    saved_completed_map = user_minor_prefs.get("completed_categories") or {}
+
+    resolved_minor_version = (
+        minor_version.strip().lower()
+        or str(saved_versions.get(minor_id) or "").strip().lower()
+    )
+    parsed_minor_categories = [
+        c.strip().lower() for c in minor_categories.split(",") if c.strip()
+    ]
+    if minor_completed is not None:
+        parsed_minor_completed = [
+            c.strip().lower() for c in minor_completed.split(",") if c.strip()
+        ]
+    else:
+        parsed_minor_completed = [
+            str(c).strip().lower()
+            for c in (saved_completed_map.get(minor_id) or [])
+            if str(c).strip()
+        ]
+    effective_hide_completed = (
+        bool(user_minor_prefs.get("hide_completed", True))
+        if minor_hide_completed is None
+        else bool(minor_hide_completed)
+    )
     effective_include_ilr = (
         include_ilr
         or bool(parsed_ilr_codes)
@@ -180,6 +213,11 @@ async def search_courses(
         include_ilr=effective_include_ilr,
         attrs=parsed_attrs,
         attr_match=attr_match,
+        minor=minor_id,
+        minor_version=resolved_minor_version,
+        minor_categories=parsed_minor_categories,
+        minor_completed_categories=parsed_minor_completed,
+        minor_hide_completed=effective_hide_completed,
         completed_courses=completed_courses,
         only_eligible=only_eligible,
         include_implied_prereqs=effective_implied,
@@ -203,6 +241,20 @@ async def get_course_attribute_options(
     target_roster = (roster or await catalog.get_default_roster_slug()).upper()
     options = await catalog.get_attribute_options(target_roster)
     return {"roster": target_roster, "attributes": options}
+
+
+@router.get("/minors/catalog")
+async def get_minors_catalog(
+    roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    user: dict[str, Any] = Depends(get_current_user),
+    catalog: CatalogSyncService = Depends(get_catalog),
+) -> dict[str, Any]:
+    target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    return await catalog.get_minors_catalog(
+        target_roster,
+        completed_courses=list(user.get("completed_courses") or []),
+        in_progress_courses=list(user.get("in_progress_courses") or []),
+    )
 
 
 @router.get("/ilr/summary")
@@ -313,6 +365,8 @@ async def get_course_detail(
         course["ilr_eligibility"] = elig.to_dict() if elig is not None else None
     course["crse_attrs"] = extract_course_attributes(course)
     course.pop("crse_attrs_json", None)
+    drop_odds_map = await fetch_course_drop_odds_map(db, roster_u, [(subject_u, catalog_nbr)])
+    course["drop_odds"] = drop_odds_map.get((subject_u, catalog_nbr))
     return {"course": course}
 
 

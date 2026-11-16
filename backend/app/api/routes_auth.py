@@ -26,6 +26,7 @@ from app.api.schemas import (
     UserPreferencesRequest,
 )
 from app.services.cs_requirements import decode_completed_course_details, decode_completed_courses
+from app.services.minors import decode_minor_prefs, encode_minor_prefs, normalize_minor_prefs
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -53,6 +54,11 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
     )
     raw_implied = user.get("include_implied_prereqs")
     mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
+    minor_prefs = (
+        dict(user["minor_prefs"])
+        if isinstance(user.get("minor_prefs"), dict)
+        else decode_minor_prefs(user.get("minor_prefs_json"))
+    )
     return {
         "id": user["id"],
         "username": user["username"],
@@ -69,6 +75,7 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
         "major_mode": mode,
         "show_cs_features": show_cs,
+        "minor_prefs": minor_prefs,
     }
 
 
@@ -93,7 +100,7 @@ async def auth_status(
                        completed_courses_json, completed_course_details_json,
                        in_progress_courses_json, in_progress_course_details_json,
                        include_implied_prereqs, show_cs_features,
-                       major_mode
+                       major_mode, minor_prefs_json
                 FROM users
                 WHERE id = ?
                 """,
@@ -162,7 +169,7 @@ async def login(
                completed_courses_json, completed_course_details_json,
                in_progress_courses_json, in_progress_course_details_json,
                include_implied_prereqs, show_cs_features,
-               major_mode
+               major_mode, minor_prefs_json
         FROM users
         WHERE username = ?
         """,
@@ -262,13 +269,23 @@ async def update_user_preferences(
             user.get("major_mode"),
             user.get("show_cs_features"),
         )
+    next_minor_prefs = (
+        normalize_minor_prefs(body.minor_prefs)
+        if body.minor_prefs is not None
+        else normalize_minor_prefs(user.get("minor_prefs") or user.get("minor_prefs_json"))
+    )
     async with db.write_tx() as conn:
         await conn.execute(
-            "UPDATE users SET major_mode = ?, show_cs_features = ? WHERE id = ?",
-            (next_mode, 1 if next_show_cs else 0, user["id"]),
+            "UPDATE users SET major_mode = ?, show_cs_features = ?, minor_prefs_json = ? WHERE id = ?",
+            (next_mode, 1 if next_show_cs else 0, encode_minor_prefs(next_minor_prefs), user["id"]),
         )
     return {
         "user": _serialize_user(
-            {**user, "major_mode": next_mode, "show_cs_features": next_show_cs}
+            {
+                **user,
+                "major_mode": next_mode,
+                "show_cs_features": next_show_cs,
+                "minor_prefs": next_minor_prefs,
+            }
         )
     }

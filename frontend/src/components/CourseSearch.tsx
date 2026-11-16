@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Award,
   BellPlus,
   BookMarked,
   CalendarCheck2,
@@ -21,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api/client";
+import { DropOddsBadge } from "./DropOddsBadge";
 import type {
   AttributeOption,
   AttrMatchMode,
@@ -37,6 +39,8 @@ import type {
   IlrMatchMode,
   IlrSummaryResponse,
   MajorMode,
+  MinorCatalogItem,
+  MinorPrefs,
   Roster,
   SearchCoursesMeta,
   Subject,
@@ -46,6 +50,7 @@ import { evaluateCourseFitsSchedule } from "../utils/schedulerSolver";
 import { CompletedPrereqsModal } from "./CompletedPrereqsModal";
 import { CourseInsightsPanel } from "./CourseInsightsPanel";
 import { IlrDistributionExplorer, ilrToneClasses } from "./IlrDistributionExplorer";
+import { MinorFilterPanel, minorToneClasses } from "./MinorFilterPanel";
 import { MultiSubjectSelect } from "./MultiSubjectSelect";
 import { StatusBadge } from "./StatusBadge";
 import { TranscriptImportModal } from "./TranscriptImportModal";
@@ -143,6 +148,11 @@ interface SearchOverride {
   ilrMultiOnly?: boolean;
   attrs?: string[];
   attrMatch?: AttrMatchMode;
+  minor?: string;
+  minorVersion?: string;
+  minorCategories?: string[];
+  minorCompleted?: string[];
+  minorHideCompleted?: boolean;
   onlyEligible?: boolean;
   ithacaOrVirtual?: boolean;
   majorMode?: MajorMode;
@@ -154,6 +164,16 @@ function resolveUserMajorMode(u: User): MajorMode {
     return u.major_mode;
   }
   return u.show_cs_features === false ? "none" : "cs";
+}
+
+function resolveUserMinorPrefs(u: User): MinorPrefs {
+  const mp = u.minor_prefs;
+  return {
+    selected_minor: mp?.selected_minor || "",
+    versions: { ...(mp?.versions || {}) },
+    completed_categories: { ...(mp?.completed_categories || {}) },
+    hide_completed: mp?.hide_completed ?? true,
+  };
 }
 
 export function CourseSearch({
@@ -193,6 +213,12 @@ export function CourseSearch({
   const [attrMatch, setAttrMatch] = useState<AttrMatchMode>("any");
   const [attrsExpanded, setAttrsExpanded] = useState(false);
   const [attrOptions, setAttrOptions] = useState<AttributeOption[]>([]);
+  const [minorPrefs, setMinorPrefs] = useState<MinorPrefs>(() => resolveUserMinorPrefs(user));
+  const [minorCategories, setMinorCategories] = useState<string[]>([]);
+  const [minorExpanded, setMinorExpanded] = useState(() => Boolean(user.minor_prefs?.selected_minor));
+  const [minorsCatalog, setMinorsCatalog] = useState<MinorCatalogItem[]>([]);
+  const [loadingMinorsCatalog, setLoadingMinorsCatalog] = useState(false);
+  const [savingMinorPrefs, setSavingMinorPrefs] = useState(false);
   const [minCredits, setMinCredits] = useState<number | null>(null);
   const [fitsActiveSchedule, setFitsActiveSchedule] = useState(false);
   const [activeSchedule, setActiveSchedule] = useState<HydratedSchedule | null>(null);
@@ -230,6 +256,25 @@ export function CourseSearch({
       setIlrMultiOnly(false);
     }
   }, [user.major_mode, user.show_cs_features]);
+
+  useEffect(() => {
+    if (user.minor_prefs) {
+      setMinorPrefs(resolveUserMinorPrefs(user));
+      if (user.minor_prefs.selected_minor) {
+        setMinorExpanded(true);
+      }
+    }
+  }, [user.minor_prefs]);
+
+  useEffect(() => {
+    if (!selectedRoster) return;
+    setLoadingMinorsCatalog(true);
+    api
+      .getMinorsCatalog(selectedRoster)
+      .then((res) => setMinorsCatalog(res.minors))
+      .catch(() => {})
+      .finally(() => setLoadingMinorsCatalog(false));
+  }, [selectedRoster, user.completed_courses, user.in_progress_courses]);
 
   useEffect(() => {
     api
@@ -355,6 +400,24 @@ export function CourseSearch({
       const effIlrMultiOnly = ilrEnabled ? (override?.ilrMultiOnly ?? ilrMultiOnly) : false;
       const effAttrs = override?.attrs ?? selectedAttrs;
       const effAttrMatch = override?.attrMatch ?? attrMatch;
+      const effMinor = override?.minor !== undefined ? override.minor : minorPrefs.selected_minor;
+      const effMinorVersion =
+        override?.minorVersion !== undefined
+          ? override.minorVersion
+          : effMinor
+            ? minorPrefs.versions[effMinor] || ""
+            : "";
+      const effMinorCategories = override?.minorCategories ?? minorCategories;
+      const effMinorCompleted =
+        override?.minorCompleted !== undefined
+          ? override.minorCompleted
+          : effMinor
+            ? minorPrefs.completed_categories[effMinor] || []
+            : [];
+      const effMinorHideCompleted =
+        override?.minorHideCompleted !== undefined
+          ? override.minorHideCompleted
+          : minorPrefs.hide_completed;
       const lvl = override?.levelMin !== undefined ? override.levelMin : levelMin;
       const minCr = override?.minCredits !== undefined ? override.minCredits : minCredits;
       const inc2000 = override?.include2000TE ?? include2000TE;
@@ -371,6 +434,7 @@ export function CourseSearch({
         !req &&
         !hasIlrCriteria &&
         effAttrs.length === 0 &&
+        !effMinor &&
         !lvl &&
         !minCr &&
         !eligibleOnly
@@ -378,10 +442,10 @@ export function CourseSearch({
         if (!silent) {
           setError(
             ilrEnabled
-              ? "Pick an ILR distribution code/preset above, select subjects, or enter a keyword or course code."
+              ? "Pick an ILR distribution code/preset above, select a minor/attributes/subjects, or enter a keyword."
               : csEnabled
-                ? "Enter a course code, keyword, pick attributes/subjects, or select a CS requirement filter."
-                : "Enter a course code, keyword, class #, pick attributes, or pick subjects."
+                ? "Enter a course code, keyword, pick a minor/attributes/subjects, or select a CS requirement filter."
+                : "Enter a course code, keyword, class #, pick a minor, attributes, or subjects."
           );
         }
         return;
@@ -408,10 +472,15 @@ export function CourseSearch({
           include_ilr: ilrEnabled,
           attrs: effAttrs,
           attr_match: effAttrMatch,
+          minor: effMinor || undefined,
+          minor_version: effMinorVersion || undefined,
+          minor_categories: effMinor ? effMinorCategories : undefined,
+          minor_completed: effMinor ? effMinorCompleted : undefined,
+          minor_hide_completed: effMinor ? effMinorHideCompleted : undefined,
           only_eligible: eligibleOnly,
           ithaca_or_virtual: ithVirt,
           refresh_stale: true,
-          limit: req || hasIlrCriteria || effAttrs.length > 0 ? 150 : 100,
+          limit: req || hasIlrCriteria || effAttrs.length > 0 || effMinor ? 200 : 100,
         });
         setCourses(res.courses);
         if (res.meta) {
@@ -716,6 +785,187 @@ export function CourseSearch({
     const nextCodes = exists ? cleaned.filter((c) => c !== code) : [...cleaned, code];
     applyIlrFilters(nextCodes, ilrMatch, ilrMultiOnly);
   }
+
+  async function persistMinorPrefs(next: MinorPrefs) {
+    setMinorPrefs(next);
+    setSavingMinorPrefs(true);
+    try {
+      const res = await api.updateUserPreferences({ minor_prefs: next });
+      onUserUpdated?.(res.user);
+    } catch {
+      // Non-fatal UI state fallback; local filter still works
+    } finally {
+      setSavingMinorPrefs(false);
+    }
+  }
+
+  function hasNonMinorSearchCriteria(): boolean {
+    const csReq = majorMode === "cs" ? csRequirement : "";
+    const hasIlr = majorMode === "ilr" && (ilrCodes.length > 0 || ilrMultiOnly);
+    return (
+      Boolean(query.trim()) ||
+      selectedSubjects.length > 0 ||
+      Boolean(csReq) ||
+      hasIlr ||
+      selectedAttrs.length > 0 ||
+      Boolean(levelMin) ||
+      Boolean(minCredits) ||
+      onlyEligible
+    );
+  }
+
+  function handleSelectMinor(minorId: string) {
+    const nextCategories: string[] = [];
+    setMinorCategories(nextCategories);
+    const defVer =
+      minorsCatalog.find((m) => m.id === minorId)?.default_version || "";
+    const nextVer = minorId
+      ? minorPrefs.versions[minorId] || defVer
+      : "";
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      selected_minor: minorId,
+      versions: minorId
+        ? { ...minorPrefs.versions, [minorId]: nextVer }
+        : minorPrefs.versions,
+    };
+    void persistMinorPrefs(nextPrefs);
+
+    if (minorId) {
+      setMinorExpanded(true);
+      void executeSearch({
+        minor: minorId,
+        minorVersion: nextVer,
+        minorCategories: nextCategories,
+        minorCompleted: nextPrefs.completed_categories[minorId] || [],
+        minorHideCompleted: nextPrefs.hide_completed,
+      });
+    } else if (hasNonMinorSearchCriteria()) {
+      void executeSearch({
+        minor: "",
+        minorVersion: "",
+        minorCategories: [],
+        minorCompleted: [],
+      });
+    } else {
+      setCourses([]);
+      setSearchMeta(null);
+      hasSearchedRef.current = false;
+    }
+  }
+
+  function handleSelectMinorVersion(versionId: string) {
+    const mId = minorPrefs.selected_minor;
+    if (!mId) return;
+    setMinorCategories([]);
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      versions: { ...minorPrefs.versions, [mId]: versionId },
+    };
+    void persistMinorPrefs(nextPrefs);
+    void executeSearch({
+      minor: mId,
+      minorVersion: versionId,
+      minorCategories: [],
+      minorCompleted: nextPrefs.completed_categories[mId] || [],
+      minorHideCompleted: nextPrefs.hide_completed,
+    });
+  }
+
+  function handleToggleMinorFilterCategory(catId: string) {
+    const mId = minorPrefs.selected_minor;
+    if (!mId) return;
+    const exists = minorCategories.includes(catId);
+    const nextCats = exists
+      ? minorCategories.filter((c) => c !== catId)
+      : [...minorCategories, catId];
+    setMinorCategories(nextCats);
+    void executeSearch({
+      minor: mId,
+      minorCategories: nextCats,
+    });
+  }
+
+  function handleClearMinorFilterCategories() {
+    setMinorCategories([]);
+    if (minorPrefs.selected_minor) {
+      void executeSearch({
+        minor: minorPrefs.selected_minor,
+        minorCategories: [],
+      });
+    }
+  }
+
+  function handleToggleMinorCompletedCategory(catId: string) {
+    const mId = minorPrefs.selected_minor;
+    if (!mId) return;
+    const prevList = minorPrefs.completed_categories[mId] || [];
+    const exists = prevList.includes(catId);
+    const nextList = exists ? prevList.filter((c) => c !== catId) : [...prevList, catId];
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      completed_categories: { ...minorPrefs.completed_categories, [mId]: nextList },
+    };
+    void persistMinorPrefs(nextPrefs);
+    void executeSearch({
+      minor: mId,
+      minorCompleted: nextList,
+      minorHideCompleted: nextPrefs.hide_completed,
+    });
+  }
+
+  function handleSetMinorHideCompleted(hide: boolean) {
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      hide_completed: hide,
+    };
+    void persistMinorPrefs(nextPrefs);
+    if (nextPrefs.selected_minor) {
+      void executeSearch({
+        minor: nextPrefs.selected_minor,
+        minorHideCompleted: hide,
+      });
+    }
+  }
+
+  function handleApplyMinorAutoFill(catIds: string[]) {
+    const mId = minorPrefs.selected_minor;
+    if (!mId) return;
+    const merged = Array.from(
+      new Set([...(minorPrefs.completed_categories[mId] || []), ...catIds])
+    );
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      completed_categories: { ...minorPrefs.completed_categories, [mId]: merged },
+    };
+    void persistMinorPrefs(nextPrefs);
+    void executeSearch({
+      minor: mId,
+      minorCompleted: merged,
+      minorHideCompleted: nextPrefs.hide_completed,
+    });
+  }
+
+  function handleClearMinorCompleted() {
+    const mId = minorPrefs.selected_minor;
+    if (!mId) return;
+    const nextPrefs: MinorPrefs = {
+      ...minorPrefs,
+      completed_categories: { ...minorPrefs.completed_categories, [mId]: [] },
+    };
+    void persistMinorPrefs(nextPrefs);
+    void executeSearch({
+      minor: mId,
+      minorCompleted: [],
+      minorHideCompleted: nextPrefs.hide_completed,
+    });
+  }
+
+  useEffect(() => {
+    if (selectedRoster && minorPrefs.selected_minor && !hasSearchedRef.current) {
+      void executeSearch();
+    }
+  }, [selectedRoster, minorPrefs.selected_minor, executeSearch]);
 
   function toggleCourse(course: CourseSummary) {
     const key = courseCacheKey(course);
@@ -1270,6 +1520,29 @@ export function CourseSearch({
                 </span>
               </button>
 
+              <button
+                type="button"
+                onClick={() => setMinorExpanded((v) => !v)}
+                aria-expanded={minorExpanded}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                  minorPrefs.selected_minor
+                    ? "border-amber-500/60 bg-amber-500/20 text-amber-100"
+                    : "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-amber-500/40"
+                }`}
+                title="Filter by Cornell minor requirements (Law & Society, Business, Inequality Studies, LSJ, History, Info Science, Psychology)"
+              >
+                <Award className="h-3.5 w-3.5 text-amber-300" />
+                <span>
+                  Minor Filter
+                  {minorPrefs.selected_minor
+                    ? ` (${
+                        minorsCatalog.find((m) => m.id === minorPrefs.selected_minor)
+                          ?.short_label || minorPrefs.selected_minor
+                      })`
+                    : ""}
+                </span>
+              </button>
+
               {showCsFeatures && onOpenChecklist && (
                 <button
                   type="button"
@@ -1409,6 +1682,35 @@ export function CourseSearch({
                 </div>
               </div>
             </div>
+          )}
+
+          {(minorExpanded || Boolean(minorPrefs.selected_minor)) && (
+            <MinorFilterPanel
+              minors={minorsCatalog}
+              loadingCatalog={loadingMinorsCatalog}
+              selectedMinor={minorPrefs.selected_minor}
+              selectedVersion={
+                minorPrefs.selected_minor
+                  ? minorPrefs.versions[minorPrefs.selected_minor] || ""
+                  : ""
+              }
+              selectedCategories={minorCategories}
+              completedCategories={
+                minorPrefs.selected_minor
+                  ? minorPrefs.completed_categories[minorPrefs.selected_minor] || []
+                  : []
+              }
+              hideCompleted={minorPrefs.hide_completed}
+              savingPrefs={savingMinorPrefs}
+              onSelectMinor={handleSelectMinor}
+              onSelectVersion={handleSelectMinorVersion}
+              onToggleFilterCategory={handleToggleMinorFilterCategory}
+              onClearFilterCategories={handleClearMinorFilterCategories}
+              onToggleCompletedCategory={handleToggleMinorCompletedCategory}
+              onSetHideCompleted={handleSetMinorHideCompleted}
+              onApplyAutoFill={handleApplyMinorAutoFill}
+              onClearCompleted={handleClearMinorCompleted}
+            />
           )}
 
           {searchPreset && (
@@ -1663,6 +1965,12 @@ export function CourseSearch({
                               {statusSummary.closed} Closed
                             </span>
                           )}
+                          {course.drop_odds &&
+                            (statusSummary.closed > 0 ||
+                              statusSummary.waitlist > 0 ||
+                              course.drop_odds.flips_all > 0) && (
+                              <DropOddsBadge dropOdds={course.drop_odds} compact />
+                            )}
                         </>
                       )}
 
@@ -1745,6 +2053,19 @@ export function CourseSearch({
                           </span>
                         ))}
 
+                      {course.minor_eligibility?.badges.map((badge) => (
+                        <span
+                          key={`minor-${badge.category_id}`}
+                          title={`${course.minor_eligibility?.minor_label} (${course.minor_eligibility?.version_label})`}
+                          className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${minorToneClasses(
+                            badge.tone,
+                            minorCategories.includes(badge.category_id)
+                          )} ${badge.completed ? "opacity-65 line-through" : ""}`}
+                        >
+                          {course.minor_eligibility?.minor_label}: {badge.label}
+                        </span>
+                      ))}
+
                       {elig?.prereq_status === "met" && (
                         <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
                           <CheckCircle2 className="h-2.5 w-2.5" />
@@ -1807,6 +2128,12 @@ export function CourseSearch({
                             {warn}
                           </span>
                         ))}
+                      {course.minor_eligibility?.warnings.map((warn) => (
+                        <span key={warn} className="inline-flex items-center gap-1 text-amber-300/95">
+                          <AlertTriangle className="h-3 w-3 shrink-0" />
+                          {warn}
+                        </span>
+                      ))}
                       {showIlrFeatures &&
                         course.ilr_eligibility?.ug_crosslist_hints.map((hint) => (
                           <span key={hint} className="inline-flex items-center gap-1 text-sky-300/95">

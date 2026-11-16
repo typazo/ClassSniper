@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
     include_implied_prereqs INTEGER NOT NULL DEFAULT 1,
     show_cs_features INTEGER NOT NULL DEFAULT 1,
     major_mode TEXT NOT NULL DEFAULT 'cs',
+    cs_checklist_json TEXT NOT NULL DEFAULT '{}',
     minor_prefs_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -144,6 +145,7 @@ CREATE TABLE IF NOT EXISTS watches (
     auto_pause INTEGER NOT NULL DEFAULT 0,
     ithaca_or_virtual INTEGER NOT NULL DEFAULT 0,
     cooldown_sec INTEGER NOT NULL DEFAULT 60,
+    group_key TEXT NOT NULL DEFAULT '',
     last_observed_status TEXT,
     last_notified_status TEXT,
     last_notified_at TEXT,
@@ -333,42 +335,56 @@ class Database:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._conn: Optional[aiosqlite.Connection] = None
+        self._read_conn: Optional[aiosqlite.Connection] = None
         self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.db_path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.executescript(SCHEMA_SQL)
-        has_major_mode = bool(
-            await self.fetch_one(
-                "SELECT 1 AS ok FROM pragma_table_info('users') WHERE name = 'major_mode'"
-            )
-        )
-        await self._ensure_columns("users", _USERS_MIGRATIONS)
-        if not has_major_mode:
-            async with self.write_tx() as conn:
-                await conn.execute(
-                    """
-                    UPDATE users
-                    SET major_mode = CASE
-                        WHEN COALESCE(show_cs_features, 1) = 1 THEN 'cs'
-                        ELSE 'none'
-                    END
-                    """
+        try:
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.executescript(SCHEMA_SQL)
+            has_major_mode = bool(
+                await self.fetch_one(
+                    "SELECT 1 AS ok FROM pragma_table_info('users') WHERE name = 'major_mode'"
                 )
-        await self._migrate_courses_meta()
-        await self._migrate_roster_sections()
-        await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
-        await self._ensure_columns("schedules", _SCHEDULES_MIGRATIONS)
-        await self._ensure_columns("subjects", _SUBJECTS_MIGRATIONS)
-        await self.execute(
-            "UPDATE subjects SET first_synced_at = synced_at WHERE first_synced_at IS NULL AND synced_at IS NOT NULL"
-        )
-        await self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_watches_group ON watches (user_id, group_key, active)"
-        )
-        await self._conn.commit()
+            )
+            await self._ensure_columns("users", _USERS_MIGRATIONS)
+            if not has_major_mode:
+                async with self.write_tx() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET major_mode = CASE
+                            WHEN COALESCE(show_cs_features, 1) = 1 THEN 'cs'
+                            ELSE 'none'
+                        END
+                        """
+                    )
+            await self._migrate_courses_meta()
+            await self._migrate_roster_sections()
+            await self._ensure_columns("watches", _WATCHES_MIGRATIONS)
+            await self._ensure_columns("schedules", _SCHEDULES_MIGRATIONS)
+            await self._ensure_columns("subjects", _SUBJECTS_MIGRATIONS)
+            await self.execute(
+                "UPDATE subjects SET first_synced_at = synced_at WHERE first_synced_at IS NULL AND synced_at IS NOT NULL"
+            )
+            await self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_watches_group ON watches (user_id, group_key, active)"
+            )
+            await self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_courses_meta_subject_nbr ON courses_meta (subject, catalog_nbr)"
+            )
+            await self._conn.commit()
+            if str(self.db_path) != ":memory:":
+                read_conn = await aiosqlite.connect(self.db_path)
+                read_conn.row_factory = aiosqlite.Row
+                await read_conn.execute("PRAGMA query_only = ON")
+                await read_conn.execute("PRAGMA busy_timeout = 10000")
+                self._read_conn = read_conn
+        except Exception:
+            await self.close()
+            raise
 
     async def _ensure_columns(
         self,
@@ -376,8 +392,8 @@ class Database:
         migrations: tuple[tuple[str, str], ...],
     ) -> set[str]:
         """Add missing columns idempotently and return the column set that existed beforehand."""
-        cursor = await self.conn.execute(f"PRAGMA table_info({table})")
-        existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
+        async with self.conn.execute(f"PRAGMA table_info({table})") as cursor:
+            existing_cols = {str(r["name"]) for r in await cursor.fetchall()}
         for col_name, col_def in migrations:
             if col_name not in existing_cols:
                 await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
@@ -399,8 +415,8 @@ class Database:
         if "location" in existing_cols:
             return
 
-        cursor = await self.conn.execute("SELECT roster, enroll_groups_json FROM courses_meta")
-        rows = await cursor.fetchall()
+        async with self.conn.execute("SELECT roster, enroll_groups_json FROM courses_meta") as cursor:
+            rows = await cursor.fetchall()
         updates: list[tuple[str, str, str, str, int]] = []
         for row in rows:
             roster = str(row["roster"])
@@ -436,6 +452,9 @@ class Database:
             )
 
     async def close(self) -> None:
+        if self._read_conn is not None:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -445,6 +464,10 @@ class Database:
         if self._conn is None:
             raise RuntimeError("Database is not connected")
         return self._conn
+
+    @property
+    def read_conn(self) -> aiosqlite.Connection:
+        return self._read_conn if self._read_conn is not None else self.conn
 
     @asynccontextmanager
     async def write_tx(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -465,13 +488,13 @@ class Database:
             return cursor
 
     async def fetch_one(self, sql: str, params: Iterable[Any] = ()) -> Optional[dict[str, Any]]:
-        cursor = await self.conn.execute(sql, tuple(params))
-        row = await cursor.fetchone()
+        async with self.read_conn.execute(sql, tuple(params)) as cursor:
+            row = await cursor.fetchone()
         return dict(row) if row is not None else None
 
     async def fetch_all(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
-        cursor = await self.conn.execute(sql, tuple(params))
-        rows = await cursor.fetchall()
+        async with self.read_conn.execute(sql, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
     async def get_setting(self, key: str, default: str = "") -> str:

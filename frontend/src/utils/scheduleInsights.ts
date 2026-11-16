@@ -1,4 +1,7 @@
 import type { ScheduleCourseItem } from "../types";
+import { getCourseEffectiveUnits } from "./schedulerSolver";
+
+export { getCourseEffectiveUnits };
 
 export interface CourseEffectiveMetrics {
   rating: number | null;
@@ -23,15 +26,6 @@ export interface ScheduleInsightsSummary {
   semesterLoadScore: number | null;
   semesterTier: DifficultyTier | null;
   difficultyTier: DifficultyTier | null;
-}
-
-export function getCourseEffectiveUnits(course: ScheduleCourseItem): number {
-  if (course.selected_units != null && course.selected_units > 0) {
-    return course.selected_units;
-  }
-  if (course.units_max > 0) return course.units_max;
-  if (course.units_min > 0) return course.units_min;
-  return 0;
 }
 
 export function getDifficultyTier(score: number): DifficultyTier {

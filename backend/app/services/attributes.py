@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
-import orjson
+from app.services.common import decode_json_list
 
 _ATTR_TOKEN_RE = re.compile(r"\b([A-Z0-9]+(?:-[A-Z0-9]+)+)\b|\b([A-Z]{2,}LANG|[A-Z]{2,}AREA)\b")
 _FWS_TITLE_RE = re.compile(r"(?:^|\b)FWS\s*[:\-–]|^\s*FWS\b", re.IGNORECASE)
@@ -70,18 +70,6 @@ def normalize_attr_code(raw: str) -> str:
     return ATTR_ALIASES.get(code, code)
 
 
-def _decode_attrs_raw(crse_attrs_json: Any) -> list[Any]:
-    if isinstance(crse_attrs_json, list):
-        return crse_attrs_json
-    if isinstance(crse_attrs_json, str) and crse_attrs_json.strip():
-        try:
-            loaded = orjson.loads(crse_attrs_json)
-            return loaded if isinstance(loaded, list) else []
-        except Exception:
-            return []
-    return []
-
-
 def _collect_attr_texts(entry: Any, out: list[str]) -> None:
     if isinstance(entry, dict):
         for key in ("crseAttrValues", "attrDescr", "attrDesc", "crseAttrValueDescr"):
@@ -99,7 +87,7 @@ def _collect_attr_texts(entry: Any, out: list[str]) -> None:
 def extract_course_attributes(course: dict[str, Any]) -> list[str]:
     """Extract sorted canonical distribution/college attribute codes from course metadata."""
     found: set[str] = set()
-    raw_items = _decode_attrs_raw(
+    raw_items = decode_json_list(
         course.get("crse_attrs_json") if "crse_attrs_json" in course else course.get("crse_attrs")
     )
     texts: list[str] = []
@@ -159,7 +147,6 @@ def summarize_roster_attributes(rows: Iterable[dict[str, Any]]) -> list[dict[str
         for code in extract_course_attributes(row):
             counts[code] = counts.get(code, 0) + 1
 
-    known_by_code = {entry["code"]: entry for entry in ATTRIBUTE_CATALOG}
     options: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -185,6 +172,4 @@ def summarize_roster_attributes(rows: Iterable[dict[str, Any]]) -> list[dict[str
             }
         )
 
-    # Also include known non-empty or standard A&S/college options
-    _ = known_by_code
     return options

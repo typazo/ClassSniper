@@ -12,6 +12,7 @@ import httpx
 import orjson
 
 from app.db import Database
+from app.services.common import parse_utc_dt
 from app.services.notifiers import build_roster_course_url
 
 CORNELL_RMP_LEGACY_ID = "298"
@@ -52,7 +53,7 @@ def build_external_links(roster: str, subject: str, catalog_nbr: str) -> dict[st
         "roster": build_roster_course_url(roster_u, subject_u, cat_clean),
         "cu_reviews": f"{CUREVIEWS_BASE_URL}/course/{quote(subject_u)}/{quote(cat_clean)}",
         "coursicle": f"https://www.coursicle.com/cornell/courses/{quote(subject_u)}/{quote(cat_clean)}/",
-        "rmp_search": f"https://www.ratemyprofessors.com/search/professors/{CORNELL_RMP_LEGACY_ID}?q={quote_plus(subject_u)}",
+        "rmp_search": build_rmp_search_url(subject_u),
     }
 
 
@@ -154,20 +155,8 @@ def _select_best_rmp_match(
     return best_node
 
 
-def _parse_iso_dt(raw: Optional[str]) -> Optional[datetime]:
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        return None
-
-
 def _is_fresh(fetched_at: Optional[str], found: int, ttl_hours: float, miss_ttl_hours: float) -> bool:
-    dt = _parse_iso_dt(fetched_at)
+    dt = parse_utc_dt(fetched_at)
     if dt is None:
         return False
     max_age = timedelta(hours=ttl_hours if found else miss_ttl_hours)
@@ -282,50 +271,64 @@ class CourseInsightsService:
             else:
                 rmp_items.append(res)
 
+        links = build_external_links(roster_u, subject_u, cat_clean)
         return {
             "roster": roster_u,
             "subject": subject_u,
             "catalog_nbr": cat_clean,
-            "links": build_external_links(roster_u, subject_u, cat_clean),
+            "links": links,
             "cu_reviews": cu_data,
             "rmp": {
                 "instructors": rmp_items,
-                "search_url": f"https://www.ratemyprofessors.com/search/professors/{CORNELL_RMP_LEGACY_ID}?q={quote_plus(subject_u)}",
+                "search_url": links["rmp_search"],
             },
         }
 
-    async def get_cureviews(self, subject: str, catalog_nbr: str, force_refresh: bool = False) -> dict[str, Any]:
-        subject_u = subject.upper()
-        cat_clean = catalog_nbr.strip()
-        course_url = f"{CUREVIEWS_BASE_URL}/course/{quote(subject_u)}/{quote(cat_clean)}"
-
-        lock = self._get_course_lock(subject_u, cat_clean)
+    async def _cached_fetch(
+        self,
+        lock: asyncio.Lock,
+        force_refresh: bool,
+        select_sql: str,
+        select_params: tuple[Any, ...],
+        upsert_sql: str,
+        build_upsert_params: Any,
+        fetcher: Any,
+    ) -> dict[str, Any]:
+        """Serialize SQLite-backed external insight fetch & cache upsert cleanly."""
         async with lock:
             if not force_refresh:
-                cached = await self.db.fetch_one(
-                    "SELECT payload_json, found, fetched_at FROM course_insights_cache WHERE subject = ? AND catalog_nbr = ?",
-                    (subject_u, cat_clean),
-                )
+                cached = await self.db.fetch_one(select_sql, select_params)
                 if cached and _is_fresh(cached["fetched_at"], cached["found"], self.cache_ttl_hours, self.miss_ttl_hours):
                     data = orjson.loads(cached["payload_json"])
                     data["cached"] = True
                     return data
 
-            fetched, cacheable = await self._fetch_cureviews_remote(subject_u, cat_clean, course_url)
+            fetched, cacheable = await fetcher()
             if cacheable:
-                await self.db.execute(
-                    """
-                    INSERT INTO course_insights_cache (subject, catalog_nbr, payload_json, found, fetched_at)
-                    VALUES (?, ?, ?, ?, datetime('now'))
-                    ON CONFLICT(subject, catalog_nbr) DO UPDATE SET
-                        payload_json = excluded.payload_json,
-                        found = excluded.found,
-                        fetched_at = datetime('now')
-                    """,
-                    (subject_u, cat_clean, orjson.dumps(fetched).decode("utf-8"), 1 if fetched["found"] else 0),
-                )
+                await self.db.execute(upsert_sql, build_upsert_params(fetched))
             fetched["cached"] = False
             return fetched
+
+    async def get_cureviews(self, subject: str, catalog_nbr: str, force_refresh: bool = False) -> dict[str, Any]:
+        subject_u = subject.upper()
+        cat_clean = catalog_nbr.strip()
+        course_url = f"{CUREVIEWS_BASE_URL}/course/{quote(subject_u)}/{quote(cat_clean)}"
+        return await self._cached_fetch(
+            lock=self._get_course_lock(subject_u, cat_clean),
+            force_refresh=force_refresh,
+            select_sql="SELECT payload_json, found, fetched_at FROM course_insights_cache WHERE subject = ? AND catalog_nbr = ?",
+            select_params=(subject_u, cat_clean),
+            upsert_sql="""
+                INSERT INTO course_insights_cache (subject, catalog_nbr, payload_json, found, fetched_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(subject, catalog_nbr) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    found = excluded.found,
+                    fetched_at = datetime('now')
+            """,
+            build_upsert_params=lambda f: (subject_u, cat_clean, orjson.dumps(f).decode("utf-8"), 1 if f["found"] else 0),
+            fetcher=lambda: self._fetch_cureviews_remote(subject_u, cat_clean, course_url),
+        )
 
     async def _fetch_cureviews_remote(self, subject_u: str, cat_clean: str, course_url: str) -> tuple[dict[str, Any], bool]:
         base_miss: dict[str, Any] = {
@@ -438,40 +441,28 @@ class CourseInsightsService:
         cleaned_query, target_first, target_last = normalize_instructor_query(name)
         name_key = cleaned_query.lower() or name.strip().lower()
         search_url = build_rmp_search_url(cleaned_query or name)
-
-        lock = self._get_rmp_lock(name_key)
-        async with lock:
-            if not force_refresh:
-                cached = await self.db.fetch_one(
-                    "SELECT payload_json, found, fetched_at FROM rmp_instructor_cache WHERE name_key = ?",
-                    (name_key,),
-                )
-                if cached and _is_fresh(cached["fetched_at"], cached["found"], self.cache_ttl_hours, self.miss_ttl_hours):
-                    data = orjson.loads(cached["payload_json"])
-                    data["cached"] = True
-                    return data
-
-            fetched, cacheable = await self._fetch_rmp_remote(
+        return await self._cached_fetch(
+            lock=self._get_rmp_lock(name_key),
+            force_refresh=force_refresh,
+            select_sql="SELECT payload_json, found, fetched_at FROM rmp_instructor_cache WHERE name_key = ?",
+            select_params=(name_key,),
+            upsert_sql="""
+                INSERT INTO rmp_instructor_cache (name_key, payload_json, found, fetched_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(name_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    found = excluded.found,
+                    fetched_at = datetime('now')
+            """,
+            build_upsert_params=lambda f: (name_key, orjson.dumps(f).decode("utf-8"), 1 if f["found"] else 0),
+            fetcher=lambda: self._fetch_rmp_remote(
                 display_name=name,
                 cleaned_query=cleaned_query or name,
                 target_first=target_first,
                 target_last=target_last,
                 search_url=search_url,
-            )
-            if cacheable:
-                await self.db.execute(
-                    """
-                    INSERT INTO rmp_instructor_cache (name_key, payload_json, found, fetched_at)
-                    VALUES (?, ?, ?, datetime('now'))
-                    ON CONFLICT(name_key) DO UPDATE SET
-                        payload_json = excluded.payload_json,
-                        found = excluded.found,
-                        fetched_at = datetime('now')
-                    """,
-                    (name_key, orjson.dumps(fetched).decode("utf-8"), 1 if fetched["found"] else 0),
-                )
-            fetched["cached"] = False
-            return fetched
+            ),
+        )
 
     async def _query_rmp_edges(self, text: str) -> Optional[list[dict[str, Any]]]:
         try:

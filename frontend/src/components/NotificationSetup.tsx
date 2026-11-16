@@ -61,8 +61,31 @@ export function NotificationSetup() {
   }
 
   async function handleRemoveSub(id: number) {
-    await api.unsubscribePush(id);
-    await loadPrefs();
+    setError("");
+    setBusy(true);
+    try {
+      await api.unsubscribePush(id);
+      await loadPrefs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove device");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleToggleWebPush(enabled: boolean) {
+    setWebPushEnabled(enabled);
+    setError("");
+    setBusy(true);
+    try {
+      await api.updateNotifyPreferences({ web_push_enabled: enabled });
+      setStatusMsg(enabled ? "Web Push alerts enabled." : "Web Push alerts paused.");
+    } catch (err) {
+      setWebPushEnabled(!enabled);
+      setError(err instanceof Error ? err.message : "Failed to update Web Push setting");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleSavePrefs(e: React.FormEvent) {
@@ -138,11 +161,13 @@ export function NotificationSetup() {
         </div>
 
         {onIosNonStandalone && (
-          <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200">
-            <p className="font-semibold">iPhone / iPad Required Step (iOS 16.4+):</p>
-            <ol className="mt-1.5 list-inside list-decimal space-y-1 text-amber-100/90">
+          <details className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200">
+            <summary className="cursor-pointer font-semibold">
+              iPhone / iPad setup: Add to Home Screen first to enable Web Push
+            </summary>
+            <ol className="mt-2 list-inside list-decimal space-y-1 text-amber-100/90">
               <li>
-                Open this page in <strong>Safari</strong>, tap the <strong>Share</strong> icon, and choose{" "}
+                Open this page in <strong>Safari</strong>, tap <strong>Share</strong>, and choose{" "}
                 <strong>Add to Home Screen</strong>.
               </li>
               <li>
@@ -150,7 +175,7 @@ export function NotificationSetup() {
                 <strong>Enable Push on This Device</strong> below.
               </li>
             </ol>
-          </div>
+          </details>
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -172,6 +197,17 @@ export function NotificationSetup() {
           </button>
         </div>
 
+        <label className="mt-3 inline-flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            checked={webPushEnabled}
+            disabled={busy}
+            onChange={(e) => void handleToggleWebPush(e.target.checked)}
+            className="accent-emerald-500"
+          />
+          Send Web Push alerts to registered devices
+        </label>
+
         {!supportsWebPush() && (
           <p className="mt-2 text-xs text-zinc-500">
             Web Push requires HTTPS (or localhost) and Safari Home Screen mode on iOS.
@@ -192,8 +228,9 @@ export function NotificationSetup() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleRemoveSub(sub.id)}
-                  className="text-rose-400 hover:text-rose-300"
+                  disabled={busy}
+                  onClick={() => void handleRemoveSub(sub.id)}
+                  className="text-rose-400 hover:text-rose-300 disabled:opacity-40"
                   aria-label="Remove device"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
@@ -212,9 +249,9 @@ export function NotificationSetup() {
               <MessageSquare className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">Shared Discord Channel Pings</h2>
+              <h2 className="text-base font-bold text-white">Discord Alerts &amp; @mentions</h2>
               <p className="mt-0.5 text-xs text-zinc-400">
-                Join the shared Discord alerts channel, set its notifications to <strong>Only @mentions</strong>, and enter your Discord User ID below.
+                Get @mentioned in the shared channel or routed to a personal Discord webhook.
               </p>
             </div>
           </div>
@@ -228,20 +265,22 @@ export function NotificationSetup() {
           </button>
         </div>
 
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3.5 text-xs text-zinc-300 space-y-1.5">
-          <div className="font-semibold text-zinc-100">How to copy your Discord User ID (15 seconds):</div>
-          <ol className="list-inside list-decimal space-y-1 text-zinc-400">
+        <details className="rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-300">
+          <summary className="cursor-pointer font-semibold text-zinc-200">
+            How to find your Discord User ID
+          </summary>
+          <ol className="mt-2 list-inside list-decimal space-y-1 text-zinc-400">
             <li>
-              In Discord Settings &rarr; <strong>Advanced</strong> (Desktop or Mobile), toggle on <strong>Developer Mode</strong>.
+              In Discord Settings &rarr; <strong>Advanced</strong>, toggle on <strong>Developer Mode</strong>.
             </li>
             <li>
-              Click/tap your own profile in any server chat &rarr; <strong>Copy User ID</strong> (a 17–19 digit number).
+              Click your profile &rarr; <strong>Copy User ID</strong> (a 17–19 digit number).
             </li>
             <li>
-              In the shared <code>#class-alerts</code> channel settings, set Notifications to <strong>Only @mentions</strong> so you only get pinged for your classes.
+              In the shared <code>#class-alerts</code> channel, set notifications to <strong>Only @mentions</strong>.
             </li>
           </ol>
-        </div>
+        </details>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div>
@@ -271,29 +310,18 @@ export function NotificationSetup() {
           )}
         </div>
 
-        <div className="flex flex-wrap gap-4 text-xs text-zinc-300">
-          <label className="flex cursor-pointer items-center gap-2">
-            <input
-              type="checkbox"
-              checked={webPushEnabled}
-              onChange={(e) => setWebPushEnabled(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            Send Web Push alerts
-          </label>
-          <label className="flex cursor-pointer items-center gap-2">
-            <input
-              type="checkbox"
-              checked={discordPingEnabled}
-              onChange={(e) => setDiscordPingEnabled(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            Ping me in shared Discord channel
-            {prefs && !prefs.shared_discord_configured && (
-              <span className="text-amber-400">(Shared webhook not configured by admin yet)</span>
-            )}
-          </label>
-        </div>
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            checked={discordPingEnabled}
+            onChange={(e) => setDiscordPingEnabled(e.target.checked)}
+            className="accent-emerald-500"
+          />
+          Ping me in shared Discord channel
+          {prefs && !prefs.shared_discord_configured && (
+            <span className="text-amber-400">(Shared webhook not configured by admin yet)</span>
+          )}
+        </label>
 
         <div className="flex justify-end">
           <button

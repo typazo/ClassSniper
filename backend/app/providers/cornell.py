@@ -18,6 +18,7 @@ from app.providers.base import (
     SubjectRecord,
     UpstreamUnavailableError,
 )
+from app.services.common import parse_catalog_num, to_float as _to_float
 
 LETTER_GRADE_BASES: frozenset[str] = frozenset({"GRD", "GRI", "OPT", "OPI"})
 ITHACA_LOCATIONS: frozenset[str] = frozenset({"ITH"})
@@ -38,7 +39,6 @@ VIRTUAL_INSTRUCTION_MODES: frozenset[str] = frozenset(
 VIRTUAL_ALLOWED_LOCATIONS: frozenset[str] = frozenset(
     {"", "ITH", "ONLINE", "VIRT", "VIRTUAL", "DIST", "REMOTE", "WEB"}
 )
-_CATALOG_DIGITS_RE = re.compile(r"(\d+)")
 
 
 def is_virtual_instruction_mode(instruction_mode: str = "") -> bool:
@@ -63,21 +63,6 @@ def is_ithaca_or_virtual_section(
     if is_virtual_instruction_mode(instruction_mode) and loc in VIRTUAL_ALLOWED_LOCATIONS:
         return True
     return False
-
-
-def parse_catalog_num(catalog_nbr: str) -> int:
-    """Extract leading integer catalog number (e.g. '4820' -> 4820, '2110A' -> 2110)."""
-    match = _CATALOG_DIGITS_RE.search(catalog_nbr or "")
-    return int(match.group(1)) if match else 0
-
-
-def _to_float(val: Any) -> Optional[float]:
-    if val is None or val == "":
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
 
 
 def compute_course_derived_fields(
@@ -171,11 +156,20 @@ def _format_meetings(meetings: list[dict[str, Any]]) -> tuple[str, str]:
     return "; ".join(meeting_parts) or "TBA", ", ".join(instructors) or "Staff"
 
 
+def _decode_cornell_json(raw_bytes: bytes) -> dict[str, Any]:
+    try:
+        payload = orjson.loads(raw_bytes)
+    except Exception as exc:
+        raise UpstreamUnavailableError(message=f"Invalid JSON from Cornell API: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        status_val = payload.get("status") if isinstance(payload, dict) else type(payload).__name__
+        raise UpstreamUnavailableError(message=f"Unexpected Cornell API status: {status_val}")
+    return payload
+
+
 def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseRecord]:
     """Parse Cornell /search/classes.json response bytes into normalized CourseRecord items."""
-    payload = orjson.loads(raw_bytes)
-    if payload.get("status") != "success":
-        raise UpstreamUnavailableError(message=f"Unexpected Cornell API status: {payload.get('status')}")
+    payload = _decode_cornell_json(raw_bytes)
 
     raw_classes = (payload.get("data") or {}).get("classes") or []
     courses: list[CourseRecord] = []
@@ -190,7 +184,10 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
         title_long = str(cls.get("titleLong") or title_short).strip()
         description = str(cls.get("description") or "").strip()
         crse_id_raw = cls.get("crseId")
-        crse_id = int(crse_id_raw) if crse_id_raw is not None else None
+        try:
+            crse_id = int(crse_id_raw) if crse_id_raw is not None else None
+        except (TypeError, ValueError):
+            crse_id = None
         acad_career = str(cls.get("acadCareer") or "").strip().upper()
         acad_group = str(cls.get("acadGroup") or "").strip().upper()
         catalog_prereq = str(cls.get("catalogPrereq") or cls.get("catalogPrereqCoreq") or "").strip()
@@ -208,7 +205,10 @@ def parse_cornell_classes_payload(raw_bytes: bytes, roster: str) -> list[CourseR
                 class_nbr_raw = sec.get("classNbr")
                 if class_nbr_raw is None:
                     continue
-                class_nbr = int(class_nbr_raw)
+                try:
+                    class_nbr = int(class_nbr_raw)
+                except (TypeError, ValueError):
+                    continue
                 meetings_summary, instructors_summary = _format_meetings(sec.get("meetings") or [])
                 sections.append(
                     SectionRecord(
@@ -311,7 +311,7 @@ class CornellRosterApiProvider:
 
     async def fetch_rosters(self) -> list[RosterRecord]:
         raw, _ = await self._get_bytes("config/rosters.json")
-        payload = orjson.loads(raw)
+        payload = _decode_cornell_json(raw)
         rows = (payload.get("data") or {}).get("rosters") or []
         return [
             RosterRecord(
@@ -328,7 +328,7 @@ class CornellRosterApiProvider:
 
     async def fetch_subjects(self, roster: str) -> list[SubjectRecord]:
         raw, _ = await self._get_bytes("config/subjects.json", params={"roster": roster.upper()})
-        payload = orjson.loads(raw)
+        payload = _decode_cornell_json(raw)
         rows = (payload.get("data") or {}).get("subjects") or []
         return [
             SubjectRecord(

@@ -145,6 +145,8 @@ def create_app(
         finally:
             for t in bg_tasks:
                 t.cancel()
+            if bg_tasks:
+                await asyncio.gather(*bg_tasks, return_exceptions=True)
             await catalog.stop_workers()
             await poller.stop()
             await insights.close()
@@ -207,9 +209,11 @@ def create_app(
     async def spa_fallback(full_path: str) -> FileResponse:
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="API route not found")
-        candidate = (static_dir / full_path).resolve()
-        if full_path and static_dir.exists() and str(candidate).startswith(str(static_dir.resolve())) and candidate.is_file():
-            return FileResponse(candidate)
+        if full_path and static_dir.exists():
+            static_root = static_dir.resolve()
+            candidate = (static_dir / full_path).resolve()
+            if candidate.is_relative_to(static_root) and candidate.is_file():
+                return FileResponse(candidate)
         index_path = static_dir / "index.html"
         if index_path.exists():
             return FileResponse(index_path)

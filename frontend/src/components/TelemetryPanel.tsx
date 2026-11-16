@@ -1,5 +1,5 @@
-import React from "react";
-import { Activity, AlertTriangle, Clock, Gauge, TrendingUp } from "lucide-react";
+import React, { useState } from "react";
+import { Activity, AlertTriangle, Clock, Gauge, RefreshCw, TrendingUp } from "lucide-react";
 import type { MetricsResponse, PollerMetrics } from "../types";
 import { DropOddsBadge } from "./DropOddsBadge";
 import { StatusBadge } from "./StatusBadge";
@@ -8,12 +8,24 @@ interface Props {
   metrics: MetricsResponse | null;
   livePoller: PollerMetrics | null;
   sseConnected: boolean;
+  onRefresh?: () => Promise<void> | void;
 }
 
-export function TelemetryPanel({ metrics, livePoller, sseConnected }: Props) {
+export function TelemetryPanel({ metrics, livePoller, sseConnected, onRefresh }: Props) {
+  const [refreshing, setRefreshing] = useState(false);
   const poller = livePoller || metrics?.poller;
   const events = metrics?.recent_events || [];
   const leaderboard = metrics?.drop_leaderboard || [];
+
+  async function handleRefresh() {
+    if (!onRefresh || refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   if (!poller) {
     return (
@@ -25,6 +37,22 @@ export function TelemetryPanel({ metrics, livePoller, sseConnected }: Props) {
 
   return (
     <div className="space-y-5">
+      {onRefresh && (
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-zinc-400">
+            {sseConnected ? "Live stream connected" : "Reconnecting stream..."}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleRefresh()}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-4">
           <div className="flex items-center gap-2 text-xs text-zinc-400">

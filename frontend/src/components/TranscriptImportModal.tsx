@@ -99,7 +99,7 @@ export const TranscriptImportModal: React.FC<Props> = ({
   );
 
   const applyParsedText = (text: string) => {
-    const parsed = parseCornellTranscriptText(text, rosterSlugs);
+    const parsed = parseCornellTranscriptText(text);
     if (
       parsed.completed.length === 0 &&
       parsed.inProgress.length === 0 &&
@@ -451,6 +451,8 @@ export const TranscriptImportModal: React.FC<Props> = ({
                   type="button"
                   onClick={() => {
                     setHasParsed(false);
+                    setFileName("");
+                    setParseError("");
                     setImportError("");
                   }}
                   className="text-xs text-sky-300 hover:underline"

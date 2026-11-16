@@ -8,12 +8,12 @@ import re
 from typing import Any, Literal, Optional
 
 import orjson
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.api.deps import get_catalog, get_insights, get_scheduler
 from app.api.schemas import (
     CompletedPrereqsRequest,
     ImportTranscriptRequest,
-    RefreshSubjectsRequest,
     SyncCatalogRequest,
     UpdateCsChecklistRequest,
 )
@@ -44,18 +44,6 @@ def _roster_sort_key(slug: str) -> tuple[int, int, str]:
     if len(s) == 4 and s[:2] in _SEASON_ORDER and s[2:].isdigit():
         return (int(s[2:]), _SEASON_ORDER[s[:2]], s)
     return (9999, 9, s)
-
-
-def get_catalog(request: Request) -> CatalogSyncService:
-    return request.app.state.catalog
-
-
-def get_insights(request: Request) -> CourseInsightsService:
-    return request.app.state.insights
-
-
-def get_scheduler(request: Request) -> SchedulerService:
-    return request.app.state.scheduler
 
 
 @router.get("/rosters")
@@ -271,16 +259,6 @@ async def get_ilr_summary(
         ithaca_or_virtual=ithaca_or_virtual,
         sync_priority=sync_priority,
     )
-
-
-@router.post("/courses/refresh-subjects")
-async def queue_refresh_subjects(
-    body: RefreshSubjectsRequest,
-    _: dict[str, Any] = Depends(get_current_user),
-    catalog: CatalogSyncService = Depends(get_catalog),
-) -> dict[str, Any]:
-    queued = catalog.queue_visible_refresh(body.roster, body.subjects)
-    return {"roster": body.roster.upper(), "queued": queued}
 
 
 @router.get("/catalog/status")

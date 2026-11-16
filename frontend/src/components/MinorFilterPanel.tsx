@@ -12,40 +12,10 @@ import {
   X,
 } from "lucide-react";
 import type { MinorCatalogItem } from "../types";
+import { toneClasses } from "../utils/courseFormat";
 
 export function minorToneClasses(tone: string, highlighted = false): string {
-  switch (tone) {
-    case "emerald":
-      return highlighted
-        ? "border-emerald-400/70 bg-emerald-500/25 text-emerald-100"
-        : "border-emerald-500/40 bg-emerald-500/15 text-emerald-200";
-    case "sky":
-      return highlighted
-        ? "border-sky-400/70 bg-sky-500/25 text-sky-100"
-        : "border-sky-500/40 bg-sky-500/15 text-sky-200";
-    case "violet":
-      return highlighted
-        ? "border-violet-400/70 bg-violet-500/25 text-violet-100"
-        : "border-violet-500/40 bg-violet-500/15 text-violet-200";
-    case "amber":
-      return highlighted
-        ? "border-amber-400/70 bg-amber-500/25 text-amber-100"
-        : "border-amber-500/40 bg-amber-500/15 text-amber-200";
-    case "teal":
-      return highlighted
-        ? "border-teal-400/70 bg-teal-500/25 text-teal-100"
-        : "border-teal-500/40 bg-teal-500/15 text-teal-200";
-    case "rose":
-      return highlighted
-        ? "border-rose-400/70 bg-rose-500/25 text-rose-100"
-        : "border-rose-500/40 bg-rose-500/15 text-rose-200";
-    case "indigo":
-      return highlighted
-        ? "border-indigo-400/70 bg-indigo-500/25 text-indigo-100"
-        : "border-indigo-500/40 bg-indigo-500/15 text-indigo-200";
-    default:
-      return "border-zinc-700 bg-zinc-800/80 text-zinc-200";
-  }
+  return toneClasses(tone, highlighted ? "highlight" : "badge");
 }
 
 interface Props {
@@ -442,23 +412,9 @@ export function MinorFilterPanel({
           </div>
         </div>
       ) : (
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
-          <span>
-            Pick one of Cornell&apos;s 7 supported minors above to browse qualifying courses, view tracks/concentrations, and hide parts you&apos;ve already completed:
-          </span>
-          <div className="flex flex-wrap gap-1.5">
-            {minors.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => onSelectMinor(m.id)}
-                className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-zinc-200 transition hover:border-amber-500/60 hover:text-amber-200"
-              >
-                {m.short_label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <p className="text-[11px] text-zinc-400">
+          Pick one of Cornell&apos;s {minors.length || 7} supported minors above to filter requirements and mark completed categories.
+        </p>
       )}
     </div>
   );

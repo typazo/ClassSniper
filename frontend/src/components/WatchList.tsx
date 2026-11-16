@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import {
   Activity,
-  AlertTriangle,
   Check,
   Copy,
   ExternalLink,
@@ -16,10 +15,10 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api/client";
+import { useCopyFeedback } from "../hooks/useCopyFeedback";
 import type { Watch, WatchHistoryResponse, WatchHistoryWindow } from "../types";
-import { getSectionLocationTag, getSectionVirtualLabel } from "../utils/location";
-import { copyText } from "../utils/pwa";
 import { DropOddsBadge, formatDurationSec } from "./DropOddsBadge";
+import { SectionLocationTags } from "./LocationBadges";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
@@ -35,11 +34,168 @@ const MODE_LABELS: Record<Watch["mode"], string> = {
   any_section: "Any Section",
 };
 
+function WatchHistoryDrawer({
+  watch,
+  activeWindow,
+  data,
+  loading,
+  onSelectWindow,
+}: {
+  watch: Watch;
+  activeWindow: WatchHistoryWindow;
+  data?: WatchHistoryResponse;
+  loading: boolean;
+  onSelectWindow: (win: WatchHistoryWindow) => void;
+}) {
+  return (
+    <div className="mt-3 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/85 p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 font-semibold text-sky-200">
+          <Activity className="h-3.5 w-3.5" />
+          <span>Seat Turnover &amp; Flip History</span>
+        </div>
+        <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
+          {(
+            [
+              { id: "24h", label: "24h" },
+              { id: "7d", label: "7d" },
+              { id: "30d", label: "30d" },
+              { id: "all", label: "All" },
+            ] as const
+          ).map((winOpt) => {
+            const activeWin = activeWindow === winOpt.id;
+            const winCnt = data?.windows?.[winOpt.id]?.total_flips;
+            return (
+              <button
+                key={winOpt.id}
+                type="button"
+                onClick={() => onSelectWindow(winOpt.id)}
+                className={`rounded-md px-2 py-0.5 font-medium ${
+                  activeWin ? "bg-sky-500 text-zinc-950" : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                {winOpt.label}
+                {winCnt !== undefined ? ` (${winCnt})` : ""}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {loading && !data ? (
+        <div className="flex items-center gap-2 py-3 text-zinc-400">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+          Loading flip statistics...
+        </div>
+      ) : (
+        data && (
+          <>
+            {(() => {
+              const curWin = activeWindow || data.window;
+              const stats = data.windows[curWin];
+              const odds = data.drop_odds || watch.drop_odds;
+              return (
+                <div className="space-y-2">
+                  {odds && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
+                      <span>{odds.summary}</span>
+                      <span>
+                        Tracked {odds.tracking_days.toFixed(1)}d
+                        {odds.last_opened_at
+                          ? ` · Last open ${new Date(odds.last_opened_at).toLocaleString()}`
+                          : ""}
+                      </span>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                      <div className="text-[10px] text-zinc-400">Total Flips</div>
+                      <div className="text-sm font-bold text-white">{stats.total_flips}</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                      <div className="text-[10px] text-zinc-400">Opened (O)</div>
+                      <div className="text-sm font-bold text-emerald-300">{stats.opened_count}</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                      <div className="text-[10px] text-zinc-400">Closed (C)</div>
+                      <div className="text-sm font-bold text-rose-300">{stats.closed_count}</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                      <div className="text-[10px] text-zinc-400">Avg Open Window</div>
+                      <div className="text-sm font-bold text-sky-200">
+                        {formatDurationSec(stats.avg_open_sec)}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
+                      <div className="text-[10px] text-zinc-400">Median Open</div>
+                      <div className="text-sm font-bold text-emerald-200">
+                        {formatDurationSec(stats.median_open_sec)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {data.events.length === 0 ? (
+              <p className="text-[11px] text-zinc-500">
+                No recorded status flips in this time window yet. Flips are recorded automatically during live polling.
+              </p>
+            ) : (
+              <div className="max-h-44 divide-y divide-zinc-800/80 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/40">
+                {data.events.map((ev) => (
+                  <div
+                    key={ev.id}
+                    className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 text-[11px]"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-zinc-300">#{ev.class_nbr}</span>
+                      <span className="text-zinc-400">{ev.section_label}</span>
+                      <span className="font-semibold text-white">
+                        <span
+                          className={
+                            ev.old_status === "O"
+                              ? "text-emerald-300"
+                              : ev.old_status === "W"
+                                ? "text-amber-300"
+                                : "text-rose-300"
+                          }
+                        >
+                          {ev.old_status || "?"}
+                        </span>
+                        {" → "}
+                        <span
+                          className={
+                            ev.new_status === "O"
+                              ? "text-emerald-300"
+                              : ev.new_status === "W"
+                                ? "text-amber-300"
+                                : "text-rose-300"
+                          }
+                        >
+                          {ev.new_status}
+                        </span>
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-zinc-500">
+                      {new Date(ev.detected_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )
+      )}
+    </div>
+  );
+}
+
 export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearch }: Props) {
-  const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
+  const { copiedKey, copy } = useCopyFeedback<string>();
   const [busyId, setBusyId] = useState<number | null>(null);
   const [checkMsg, setCheckMsg] = useState<Record<number, string>>({});
+  const [actionError, setActionError] = useState("");
 
   // Low-clutter Pick-1 Group batch mode
   const [groupingMode, setGroupingMode] = useState(false);
@@ -53,44 +209,21 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
   const [historyDataById, setHistoryDataById] = useState<Record<number, WatchHistoryResponse>>({});
   const [historyLoadingId, setHistoryLoadingId] = useState<number | null>(null);
 
-  async function handleCopy(watch: Watch) {
-    if (!watch.class_nbr) return;
-    const ok = await copyText(String(watch.class_nbr));
-    if (ok) {
-      setCopiedId(watch.id);
-      setTimeout(() => setCopiedId((cur) => (cur === watch.id ? null : cur)), 1800);
-    }
-  }
-
-  async function handleCopyCode(text: string, key: string) {
-    const ok = await copyText(text);
-    if (ok) {
-      setCopiedCodeKey(key);
-      setTimeout(() => setCopiedCodeKey((cur) => (cur === key ? null : cur)), 1800);
-    }
-  }
-
-  async function handleToggleActive(watch: Watch) {
-    setBusyId(watch.id);
+  async function runWatchAction(watchId: number, action: () => Promise<void>, fallbackMsg: string) {
+    setActionError("");
+    setBusyId(watchId);
     try {
-      await api.updateWatch(watch.id, { active: !watch.active });
+      await action();
       onRefresh();
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function handleRearm(watch: Watch) {
-    setBusyId(watch.id);
-    try {
-      await api.rearmWatch(watch.id);
-      onRefresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : fallbackMsg);
     } finally {
       setBusyId(null);
     }
   }
 
   async function handleCheckNow(watch: Watch) {
+    setActionError("");
     setBusyId(watch.id);
     try {
       const res = await api.checkWatchNow(watch.id);
@@ -109,22 +242,15 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
     }
   }
 
-  async function handleDelete(watch: Watch) {
-    setBusyId(watch.id);
-    try {
-      await api.deleteWatch(watch.id);
-      onRefresh();
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   async function loadWatchHistory(watchId: number, window: WatchHistoryWindow) {
+    setActionError("");
     setHistoryWindowById((p) => ({ ...p, [watchId]: window }));
     setHistoryLoadingId(watchId);
     try {
       const res = await api.getWatchHistory(watchId, window);
       setHistoryDataById((p) => ({ ...p, [watchId]: res }));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to load watch history");
     } finally {
       setHistoryLoadingId((cur) => (cur === watchId ? null : cur));
     }
@@ -144,6 +270,7 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
     if (selectedForGroup.length === 0) return;
     const label = clear ? "" : groupInputName.trim();
     if (!clear && !label) return;
+    setActionError("");
     setSavingGroup(true);
     try {
       await api.batchUpdateWatchGroup(selectedForGroup, label);
@@ -151,18 +278,10 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
       setSelectedForGroup([]);
       setGroupInputName("");
       onRefresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to update Pick-1 group");
     } finally {
       setSavingGroup(false);
-    }
-  }
-
-  async function handleClearSingleGroup(watch: Watch) {
-    setBusyId(watch.id);
-    try {
-      await api.updateWatch(watch.id, { group_key: "" });
-      onRefresh();
-    } finally {
-      setBusyId(null);
     }
   }
 
@@ -194,13 +313,22 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
 
   return (
     <div className="space-y-3">
+      {actionError && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-rose-500/35 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-200">
+          <span>{actionError}</span>
+          <button type="button" onClick={() => setActionError("")} className="text-rose-300 hover:text-white">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {watches.length >= 2 && (
         <div className="flex flex-wrap items-center justify-between gap-2">
           {groupingMode ? (
             <div className="flex w-full flex-wrap items-center justify-between gap-2 rounded-2xl border border-violet-500/40 bg-violet-500/10 px-3.5 py-2.5 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <Layers className="h-3.5 w-3.5 text-violet-300" />
-                <span className="text-violet-100 font-medium">
+                <span className="font-medium text-violet-100">
                   Select 2+ watches ({selectedForGroup.length} picked):
                 </span>
                 <input
@@ -276,16 +404,16 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
           <div className="mt-2 flex flex-wrap gap-2">
             {quickOpenCodes.map(({ watchId, subject, catalogNbr, sec }) => {
               const key = `top-${watchId}-${sec.class_nbr}`;
-              const isCopied = copiedCodeKey === key;
+              const isCopied = copiedKey === key;
               return (
                 <button
                   key={key}
                   type="button"
-                  onClick={() => handleCopyCode(String(sec.class_nbr), key)}
+                  onClick={() => void copy(String(sec.class_nbr), key)}
                   title={`Click to copy ${sec.class_nbr} (${subject} ${catalogNbr} ${sec.ssr_component} ${sec.section})`}
                   className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs transition ${
                     isCopied
-                      ? "border-emerald-300 bg-emerald-400 text-zinc-950 font-bold"
+                      ? "border-emerald-300 bg-emerald-400 font-bold text-zinc-950"
                       : sec.open_status === "W"
                         ? "border-amber-400/50 bg-zinc-950/90 text-amber-200 hover:border-amber-300"
                         : "border-emerald-500/50 bg-zinc-950/90 text-emerald-200 hover:border-emerald-400"
@@ -306,9 +434,11 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
       {watches.map((w) => {
         const isHighlighted = highlightClassNbr !== null && w.class_nbr === highlightClassNbr;
         const secInfo = w.section_info;
-        const secLoc = secInfo ? getSectionLocationTag(secInfo) : null;
-        const virtualLabel = secInfo ? getSectionVirtualLabel(secInfo.instruction_mode) : null;
         const rosterUrl = `https://classes.cornell.edu/browse/roster/${w.roster}/class/${w.subject}/${w.catalog_nbr}`;
+        const showScopedLocation = w.mode === "any_section" && Boolean(w.ithaca_or_virtual);
+        const extraOpenSections = (w.open_sections || []).filter((s) => s.class_nbr !== w.class_nbr);
+        const win = historyWindowById[w.id] || "7d";
+
         return (
           <div
             key={w.id}
@@ -343,28 +473,13 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   </h3>
                   {secInfo && <StatusBadge status={secInfo.open_status} />}
                   <DropOddsBadge dropOdds={w.drop_odds} />
-                  {secLoc?.isOffCampus && (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
-                      <AlertTriangle className="h-3 w-3 text-amber-300" />
-                      {secLoc.label}
-                    </span>
-                  )}
-                  {secLoc && !secLoc.isOffCampus && (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-400">
-                      <MapPin className="h-3 w-3 text-zinc-500" />
-                      {secLoc.label}
-                    </span>
-                  )}
-                  {virtualLabel && (
-                    <span className="rounded-md border border-cyan-500/35 bg-cyan-500/15 px-2 py-0.5 text-[11px] font-medium text-cyan-200">
-                      {virtualLabel}
-                    </span>
-                  )}
-                  {w.mode === "any_section" && w.ithaca_or_virtual && (
+                  {showScopedLocation ? (
                     <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                       <MapPin className="h-3 w-3" />
                       Ithaca + Virtual
                     </span>
+                  ) : (
+                    secInfo && <SectionLocationTags section={secInfo} />
                   )}
                   {w.group_key && (
                     <span
@@ -375,7 +490,13 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                       Pick-1: {w.group_key}
                       <button
                         type="button"
-                        onClick={() => void handleClearSingleGroup(w)}
+                        onClick={() =>
+                          void runWatchAction(
+                            w.id,
+                            () => api.updateWatch(w.id, { group_key: "" }).then(() => undefined),
+                            "Failed to remove group"
+                          )
+                        }
                         className="ml-0.5 text-violet-300 hover:text-white"
                         aria-label={`Remove ${w.group_key} group`}
                       >
@@ -404,68 +525,32 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   {secInfo?.meetings_summary && <span>{secInfo.meetings_summary}</span>}
                 </div>
 
-                {w.open_sections && w.open_sections.length > 0 && (
-                  <div className="mt-2.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-300">
-                        Open Section Codes (click to copy)
-                      </span>
-                      {w.open_sections.length > 1 && (
+                {extraOpenSections.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-emerald-300/90">
+                    <span className="font-medium text-zinc-400">Matching open:</span>
+                    {extraOpenSections.map((sec) => {
+                      const key = `card-${w.id}-${sec.class_nbr}`;
+                      const isCopied = copiedKey === key;
+                      return (
                         <button
+                          key={key}
                           type="button"
-                          onClick={() =>
-                            handleCopyCode(
-                              w.open_sections!.map((s) => s.class_nbr).join(", "),
-                              `all-${w.id}`
-                            )
-                          }
-                          className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-zinc-950/80 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
+                          onClick={() => void copy(String(sec.class_nbr), key)}
+                          title={`${sec.ssr_component} ${sec.section} · ${sec.meetings_summary}`}
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] transition ${
+                            isCopied
+                              ? "border-emerald-300 bg-emerald-400 font-bold text-zinc-950"
+                              : "border-emerald-500/40 bg-zinc-950/90 text-emerald-200 hover:border-emerald-400"
+                          }`}
                         >
-                          {copiedCodeKey === `all-${w.id}` ? (
-                            <Check className="h-3 w-3" />
-                          ) : (
-                            <Copy className="h-3 w-3" />
-                          )}
-                          {copiedCodeKey === `all-${w.id}` ? "Copied all" : "Copy all"}
+                          {isCopied ? <Check className="h-2.5 w-2.5" /> : <Copy className="h-2.5 w-2.5" />}
+                          {sec.class_nbr}
+                          <span className="font-sans text-[10px] opacity-80">
+                            {sec.ssr_component} {sec.section}
+                          </span>
                         </button>
-                      )}
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {w.open_sections.map((sec) => {
-                        const key = `card-${w.id}-${sec.class_nbr}`;
-                        const isCopied = copiedCodeKey === key;
-                        return (
-                          <button
-                            key={key}
-                            type="button"
-                            onClick={() => handleCopyCode(String(sec.class_nbr), key)}
-                            title={`${sec.ssr_component} ${sec.section} · ${sec.meetings_summary}`}
-                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition ${
-                              isCopied
-                                ? "border-emerald-300 bg-emerald-400 text-zinc-950 font-bold"
-                                : sec.open_status === "W"
-                                  ? "border-amber-500/40 bg-zinc-950/90 text-amber-200 hover:border-amber-400"
-                                  : "border-emerald-500/40 bg-zinc-950/90 text-emerald-200 hover:border-emerald-400"
-                            }`}
-                          >
-                            {isCopied ? (
-                              <Check className="h-3 w-3" />
-                            ) : (
-                              <Copy className="h-3 w-3" />
-                            )}
-                            <span className="font-mono font-bold">{sec.class_nbr}</span>
-                            <span className="text-[11px] opacity-85">
-                              {sec.ssr_component} {sec.section}
-                            </span>
-                            {sec.meetings_summary && sec.meetings_summary !== "TBA" && (
-                              <span className="hidden text-[10px] text-zinc-400 sm:inline">
-                                · {sec.meetings_summary}
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -473,24 +558,16 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
               <div className="flex flex-wrap items-center gap-2">
                 {w.class_nbr && (
                   <button
-                    onClick={() => handleCopy(w)}
+                    type="button"
+                    onClick={() => void copy(String(w.class_nbr), `nbr-${w.id}`)}
                     title="Copy 5-digit Class Number for Student Center"
                     className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-1.5 font-mono text-xs font-semibold text-emerald-300 hover:border-emerald-500/60"
                   >
-                    {copiedId === w.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copiedKey === `nbr-${w.id}` ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                     #{w.class_nbr}
                   </button>
                 )}
 
-                <a
-                  href="https://studentcenter.cornell.edu"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-xl bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
-                >
-                  Student Center
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
                 <a
                   href={rosterUrl}
                   target="_blank"
@@ -500,6 +577,17 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   Roster
                   <ExternalLink className="h-3 w-3" />
                 </a>
+                {quickOpenCodes.length === 0 && (
+                  <a
+                    href="https://studentcenter.cornell.edu"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded-xl bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 hover:bg-emerald-500/25"
+                  >
+                    Student Center
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
               </div>
             </div>
 
@@ -534,25 +622,40 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   </span>
                 </button>
                 <button
-                  onClick={() => handleCheckNow(w)}
+                  type="button"
+                  onClick={() => void handleCheckNow(w)}
                   disabled={busyId === w.id}
                   className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                 >
                   <RefreshCw className={`h-3 w-3 ${busyId === w.id ? "animate-spin" : ""}`} />
                   Check
                 </button>
-                {w.last_notified_at || !w.active ? (
+                {(w.last_notified_at || !w.active) && (
                   <button
-                    onClick={() => handleRearm(w)}
+                    type="button"
+                    onClick={() =>
+                      void runWatchAction(
+                        w.id,
+                        () => api.rearmWatch(w.id).then(() => undefined),
+                        "Failed to re-arm watch"
+                      )
+                    }
                     disabled={busyId === w.id}
                     className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
                   >
                     <RotateCcw className="h-3 w-3" />
                     Re-Arm
                   </button>
-                ) : null}
+                )}
                 <button
-                  onClick={() => handleToggleActive(w)}
+                  type="button"
+                  onClick={() =>
+                    void runWatchAction(
+                      w.id,
+                      () => api.updateWatch(w.id, { active: !w.active }).then(() => undefined),
+                      "Failed to update watch"
+                    )
+                  }
                   disabled={busyId === w.id}
                   className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                 >
@@ -560,7 +663,14 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   {w.active ? "Pause" : "Resume"}
                 </button>
                 <button
-                  onClick={() => handleDelete(w)}
+                  type="button"
+                  onClick={() =>
+                    void runWatchAction(
+                      w.id,
+                      () => api.deleteWatch(w.id).then(() => undefined),
+                      "Failed to delete watch"
+                    )
+                  }
                   disabled={busyId === w.id}
                   aria-label="Delete watch"
                   className="inline-flex items-center rounded-lg border border-rose-500/20 px-2 py-1 text-xs text-rose-400 hover:bg-rose-500/15 disabled:opacity-50"
@@ -571,147 +681,13 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
             </div>
 
             {expandedHistoryId === w.id && (
-              <div className="mt-3 space-y-3 rounded-xl border border-zinc-800 bg-zinc-950/85 p-3 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 font-semibold text-sky-200">
-                    <Activity className="h-3.5 w-3.5" />
-                    <span>Seat Turnover &amp; Flip History</span>
-                  </div>
-                  <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]">
-                    {(
-                      [
-                        { id: "24h", label: "24h" },
-                        { id: "7d", label: "7d" },
-                        { id: "30d", label: "30d" },
-                        { id: "all", label: "All" },
-                      ] as const
-                    ).map((winOpt) => {
-                      const activeWin = (historyWindowById[w.id] || "7d") === winOpt.id;
-                      const winCnt = historyDataById[w.id]?.windows?.[winOpt.id]?.total_flips;
-                      return (
-                        <button
-                          key={winOpt.id}
-                          type="button"
-                          onClick={() => void loadWatchHistory(w.id, winOpt.id)}
-                          className={`rounded-md px-2 py-0.5 font-medium ${
-                            activeWin ? "bg-sky-500 text-zinc-950" : "text-zinc-400 hover:text-white"
-                          }`}
-                        >
-                          {winOpt.label}
-                          {winCnt !== undefined ? ` (${winCnt})` : ""}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {historyLoadingId === w.id && !historyDataById[w.id] ? (
-                  <div className="flex items-center gap-2 py-3 text-zinc-400">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-                    Loading flip statistics...
-                  </div>
-                ) : (
-                  historyDataById[w.id] && (
-                    <>
-                      {(() => {
-                        const hist = historyDataById[w.id];
-                        const curWin = historyWindowById[w.id] || hist.window;
-                        const stats = hist.windows[curWin];
-                        const odds = hist.drop_odds || w.drop_odds;
-                        return (
-                          <div className="space-y-2">
-                            {odds && (
-                              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
-                                <span>{odds.summary}</span>
-                                <span>
-                                  Tracked {odds.tracking_days.toFixed(1)}d
-                                  {odds.last_opened_at
-                                    ? ` · Last open ${new Date(odds.last_opened_at).toLocaleString()}`
-                                    : ""}
-                                </span>
-                              </div>
-                            )}
-                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                                <div className="text-[10px] text-zinc-400">Total Flips</div>
-                                <div className="text-sm font-bold text-white">{stats.total_flips}</div>
-                              </div>
-                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                                <div className="text-[10px] text-zinc-400">Opened (O)</div>
-                                <div className="text-sm font-bold text-emerald-300">{stats.opened_count}</div>
-                              </div>
-                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                                <div className="text-[10px] text-zinc-400">Closed (C)</div>
-                                <div className="text-sm font-bold text-rose-300">{stats.closed_count}</div>
-                              </div>
-                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                                <div className="text-[10px] text-zinc-400">Avg Open Window</div>
-                                <div className="text-sm font-bold text-sky-200">
-                                  {formatDurationSec(stats.avg_open_sec)}
-                                </div>
-                              </div>
-                              <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-2">
-                                <div className="text-[10px] text-zinc-400">Median Open</div>
-                                <div className="text-sm font-bold text-emerald-200">
-                                  {formatDurationSec(stats.median_open_sec)}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      {historyDataById[w.id].events.length === 0 ? (
-                        <p className="text-[11px] text-zinc-500">
-                          No recorded status flips in this time window yet. Flips are recorded automatically during live polling.
-                        </p>
-                      ) : (
-                        <div className="max-h-44 divide-y divide-zinc-800/80 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900/40">
-                          {historyDataById[w.id].events.map((ev) => (
-                            <div
-                              key={ev.id}
-                              className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 text-[11px]"
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono text-zinc-300">#{ev.class_nbr}</span>
-                                <span className="text-zinc-400">{ev.section_label}</span>
-                                <span className="font-semibold text-white">
-                                  <span
-                                    className={
-                                      ev.old_status === "O"
-                                        ? "text-emerald-300"
-                                        : ev.old_status === "W"
-                                          ? "text-amber-300"
-                                          : "text-rose-300"
-                                    }
-                                  >
-                                    {ev.old_status || "?"}
-                                  </span>
-                                  {" → "}
-                                  <span
-                                    className={
-                                      ev.new_status === "O"
-                                        ? "text-emerald-300"
-                                        : ev.new_status === "W"
-                                          ? "text-amber-300"
-                                          : "text-rose-300"
-                                    }
-                                  >
-                                    {ev.new_status}
-                                  </span>
-                                </span>
-                              </div>
-                              <span className="text-[10px] text-zinc-500">
-                                {new Date(ev.detected_at).toLocaleString()}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )
-                )}
-              </div>
+              <WatchHistoryDrawer
+                watch={w}
+                activeWindow={win}
+                data={historyDataById[w.id]}
+                loading={historyLoadingId === w.id}
+                onSelectWindow={(nextWin) => void loadWatchHistory(w.id, nextWin)}
+              />
             )}
           </div>
         );

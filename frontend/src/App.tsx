@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   Bell,
@@ -24,6 +24,7 @@ import { SchedulerPage } from "./components/SchedulerPage";
 import { SharedScheduleView } from "./components/SharedScheduleView";
 import { TelemetryPanel } from "./components/TelemetryPanel";
 import { WatchList } from "./components/WatchList";
+import { useCopyFeedback } from "./hooks/useCopyFeedback";
 import type {
   AuthStatus,
   CatalogSubjectRefreshedSSE,
@@ -33,23 +34,39 @@ import type {
   SeatAlertSSE,
   Watch,
 } from "./types";
-import { copyText, playAlertChime } from "./utils/pwa";
+import { playAlertChime } from "./utils/pwa";
 
 type Tab = "watches" | "search" | "checklist" | "scheduler" | "alerts" | "telemetry" | "admin";
 
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [tab, setTab] = useState<Tab>("watches");
+  const [visitedTabs, setVisitedTabs] = useState<Record<Tab, boolean>>({
+    watches: true,
+    search: false,
+    checklist: false,
+    scheduler: false,
+    alerts: false,
+    telemetry: false,
+    admin: false,
+  });
   const [watches, setWatches] = useState<Watch[]>([]);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [livePoller, setLivePoller] = useState<PollerMetrics | null>(null);
   const [sseConnected, setSseConnected] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const soundEnabledRef = useRef(true);
+  soundEnabledRef.current = soundEnabled;
   const [bannerAlert, setBannerAlert] = useState<SeatAlertSSE | null>(null);
-  const [bannerCopied, setBannerCopied] = useState(false);
+  const bannerCopy = useCopyFeedback();
   const [lastCatalogRefresh, setLastCatalogRefresh] = useState<CatalogSubjectRefreshedSSE | null>(null);
   const [searchPreset, setSearchPreset] = useState<CourseSearchPreset | null>(null);
   const [checklistRoster, setChecklistRoster] = useState<string>("");
+
+  const selectTab = useCallback((nextTab: Tab) => {
+    setTab(nextTab);
+    setVisitedTabs((prev) => (prev[nextTab] ? prev : { ...prev, [nextTab]: true }));
+  }, []);
 
   const urlParams = new URLSearchParams(window.location.search);
   const initialInvite = urlParams.get("invite") || "";
@@ -106,7 +123,7 @@ export default function App() {
       try {
         const alert: SeatAlertSSE = JSON.parse((ev as MessageEvent).data);
         setBannerAlert(alert);
-        if (soundEnabled) playAlertChime();
+        if (soundEnabledRef.current) playAlertChime();
         refreshWatches();
         refreshMetrics();
       } catch {
@@ -130,7 +147,7 @@ export default function App() {
       es.close();
       setSseConnected(false);
     };
-  }, [auth?.user, refreshWatches, refreshMetrics, soundEnabled]);
+  }, [auth?.user?.id, refreshWatches, refreshMetrics]);
 
   if (shareToken) {
     return (
@@ -167,6 +184,10 @@ export default function App() {
 
   const user = auth.user;
   const activeCount = watches.filter((w) => w.active).length;
+  const activeTab: Tab =
+    (tab === "checklist" && user.major_mode !== "cs") || (tab === "admin" && user.role !== "admin")
+      ? "watches"
+      : tab;
 
   return (
     <div className="min-h-screen bg-zinc-950 pb-20 text-zinc-100 sm:pb-8">
@@ -229,24 +250,24 @@ export default function App() {
 
         {/* Desktop Nav */}
         <div className="mx-auto hidden max-w-5xl gap-1 px-4 pb-2 sm:flex">
-          <NavBtn active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label={`Watchlist (${watches.length})`} />
-          <NavBtn active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search Classes" />
+          <NavBtn active={activeTab === "watches"} onClick={() => selectTab("watches")} icon={<Crosshair className="h-4 w-4" />} label={`Watchlist (${watches.length})`} />
+          <NavBtn active={activeTab === "search"} onClick={() => selectTab("search")} icon={<Search className="h-4 w-4" />} label="Search Classes" />
           {user.major_mode === "cs" && (
-            <NavBtn active={tab === "checklist"} onClick={() => setTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="CS Checklist" />
+            <NavBtn active={activeTab === "checklist"} onClick={() => selectTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="CS Checklist" />
           )}
-          <NavBtn active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Scheduler" />
-          <NavBtn active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts & Push" />
+          <NavBtn active={activeTab === "scheduler"} onClick={() => selectTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Scheduler" />
+          <NavBtn active={activeTab === "alerts"} onClick={() => selectTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts & Push" />
           <NavBtn
-            active={tab === "telemetry"}
+            active={activeTab === "telemetry"}
             onClick={() => {
-              setTab("telemetry");
+              selectTab("telemetry");
               refreshMetrics();
             }}
             icon={<Activity className="h-4 w-4" />}
             label="Telemetry"
           />
           {user.role === "admin" && (
-            <NavBtn active={tab === "admin"} onClick={() => setTab("admin")} icon={<Settings className="h-4 w-4" />} label="Admin" />
+            <NavBtn active={activeTab === "admin"} onClick={() => selectTab("admin")} icon={<Settings className="h-4 w-4" />} label="Admin" />
           )}
         </div>
       </header>
@@ -266,17 +287,11 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={async () => {
-                  const ok = await copyText(String(bannerAlert.class_nbr));
-                  if (ok) {
-                    setBannerCopied(true);
-                    setTimeout(() => setBannerCopied(false), 1800);
-                  }
-                }}
+                onClick={() => bannerCopy.copy(String(bannerAlert.class_nbr), "banner")}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/60 bg-zinc-950/90 px-3 py-1.5 font-mono text-xs font-bold text-emerald-200 hover:bg-zinc-900"
               >
-                {bannerCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                {bannerCopied ? `Copied ${bannerAlert.class_nbr}` : `Copy ${bannerAlert.class_nbr}`}
+                {bannerCopy.copiedKey === "banner" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {bannerCopy.copiedKey === "banner" ? `Copied ${bannerAlert.class_nbr}` : `Copy ${bannerAlert.class_nbr}`}
               </button>
               <a
                 href={bannerAlert.student_center_url}
@@ -299,85 +314,105 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content */}
-      <main className={`mx-auto mt-5 px-4 ${tab === "scheduler" ? "max-w-7xl" : "max-w-5xl"}`}>
-        {tab === "watches" && (
+      {/* Main Content (visited tabs stay mounted via CSS hidden to preserve search/filter/scroll state) */}
+      <main className={`mx-auto mt-5 px-4 ${activeTab === "scheduler" ? "max-w-7xl" : "max-w-5xl"}`}>
+        <div className={activeTab === "watches" ? "" : "hidden"}>
           <WatchList
             watches={watches}
             highlightClassNbr={highlightClassNbr}
             onRefresh={refreshWatches}
-            onJumpToSearch={() => setTab("search")}
+            onJumpToSearch={() => selectTab("search")}
           />
+        </div>
+        {(visitedTabs.search || activeTab === "search") && (
+          <div className={activeTab === "search" ? "" : "hidden"}>
+            <CourseSearch
+              user={user}
+              lastCatalogRefresh={lastCatalogRefresh}
+              searchPreset={searchPreset}
+              onClearSearchPreset={() => setSearchPreset(null)}
+              onOpenChecklist={(roster) => {
+                if (roster) setChecklistRoster(roster);
+                selectTab("checklist");
+              }}
+              onUserUpdated={(updatedUser) => {
+                setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
+              }}
+              onWatchCreated={() => {
+                refreshWatches();
+                selectTab("watches");
+              }}
+              onJumpToScheduler={() => selectTab("scheduler")}
+            />
+          </div>
         )}
-        {tab === "search" && (
-          <CourseSearch
-            user={user}
-            lastCatalogRefresh={lastCatalogRefresh}
-            searchPreset={searchPreset}
-            onClearSearchPreset={() => setSearchPreset(null)}
-            onOpenChecklist={(roster) => {
-              if (roster) setChecklistRoster(roster);
-              setTab("checklist");
-            }}
-            onUserUpdated={(updatedUser) => {
-              setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
-            }}
-            onWatchCreated={() => {
-              refreshWatches();
-              setTab("watches");
-            }}
-            onJumpToScheduler={() => setTab("scheduler")}
-          />
+        {user.major_mode === "cs" && (visitedTabs.checklist || activeTab === "checklist") && (
+          <div className={activeTab === "checklist" ? "" : "hidden"}>
+            <CsChecklistPage
+              user={user}
+              initialRoster={checklistRoster}
+              lastCatalogRefresh={lastCatalogRefresh}
+              onUserUpdated={(updatedUser) => {
+                setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
+              }}
+              onLaunchSearch={(preset) => {
+                setSearchPreset(preset);
+                selectTab("search");
+              }}
+            />
+          </div>
         )}
-        {tab === "checklist" && user.major_mode === "cs" && (
-          <CsChecklistPage
-            user={user}
-            initialRoster={checklistRoster}
-            lastCatalogRefresh={lastCatalogRefresh}
-            onUserUpdated={(updatedUser) => {
-              setAuth((prev) => (prev ? { ...prev, user: updatedUser } : prev));
-            }}
-            onLaunchSearch={(preset) => {
-              setSearchPreset(preset);
-              setTab("search");
-            }}
-          />
+        {(visitedTabs.scheduler || activeTab === "scheduler") && (
+          <div className={activeTab === "scheduler" ? "" : "hidden"}>
+            <SchedulerPage
+              lastCatalogRefresh={lastCatalogRefresh}
+              onWatchesChanged={refreshWatches}
+              onJumpToSearch={() => selectTab("search")}
+            />
+          </div>
         )}
-        {tab === "scheduler" && (
-          <SchedulerPage
-            user={user}
-            lastCatalogRefresh={lastCatalogRefresh}
-            onWatchesChanged={refreshWatches}
-            onJumpToSearch={() => setTab("search")}
-          />
+        {(visitedTabs.alerts || activeTab === "alerts") && (
+          <div className={activeTab === "alerts" ? "" : "hidden"}>
+            <NotificationSetup />
+          </div>
         )}
-        {tab === "alerts" && <NotificationSetup />}
-        {tab === "telemetry" && (
-          <TelemetryPanel metrics={metrics} livePoller={livePoller} sseConnected={sseConnected} />
+        {(visitedTabs.telemetry || activeTab === "telemetry") && (
+          <div className={activeTab === "telemetry" ? "" : "hidden"}>
+            <TelemetryPanel
+              metrics={metrics}
+              livePoller={livePoller}
+              sseConnected={sseConnected}
+              onRefresh={refreshMetrics}
+            />
+          </div>
         )}
-        {tab === "admin" && user.role === "admin" && <AdminPanel />}
+        {user.role === "admin" && (visitedTabs.admin || activeTab === "admin") && (
+          <div className={activeTab === "admin" ? "" : "hidden"}>
+            <AdminPanel />
+          </div>
+        )}
       </main>
 
       {/* Mobile Bottom Nav */}
       <nav className="fixed inset-x-0 bottom-0 z-30 flex border-t border-zinc-800 bg-zinc-950/95 pb-safe backdrop-blur-md sm:hidden">
-        <MobileTab active={tab === "watches"} onClick={() => setTab("watches")} icon={<Crosshair className="h-4 w-4" />} label="Watches" />
-        <MobileTab active={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-4 w-4" />} label="Search" />
+        <MobileTab active={activeTab === "watches"} onClick={() => selectTab("watches")} icon={<Crosshair className="h-4 w-4" />} label="Watches" />
+        <MobileTab active={activeTab === "search"} onClick={() => selectTab("search")} icon={<Search className="h-4 w-4" />} label="Search" />
         {user.major_mode === "cs" && (
-          <MobileTab active={tab === "checklist"} onClick={() => setTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="Checklist" />
+          <MobileTab active={activeTab === "checklist"} onClick={() => selectTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="Checklist" />
         )}
-        <MobileTab active={tab === "scheduler"} onClick={() => setTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Schedule" />
-        <MobileTab active={tab === "alerts"} onClick={() => setTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts" />
+        <MobileTab active={activeTab === "scheduler"} onClick={() => selectTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Schedule" />
+        <MobileTab active={activeTab === "alerts"} onClick={() => selectTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts" />
         <MobileTab
-          active={tab === "telemetry"}
+          active={activeTab === "telemetry"}
           onClick={() => {
-            setTab("telemetry");
+            selectTab("telemetry");
             refreshMetrics();
           }}
           icon={<Activity className="h-4 w-4" />}
           label="Stats"
         />
         {user.role === "admin" && (
-          <MobileTab active={tab === "admin"} onClick={() => setTab("admin")} icon={<Settings className="h-4 w-4" />} label="Admin" />
+          <MobileTab active={activeTab === "admin"} onClick={() => selectTab("admin")} icon={<Settings className="h-4 w-4" />} label="Admin" />
         )}
       </nav>
     </div>

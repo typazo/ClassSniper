@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from app.providers.base import (
 )
 from app.providers.cornell import is_ithaca_or_virtual_section
 from app.services.catalog import CatalogSyncService
+from app.services.common import parse_utc_dt
 from app.services.dispatcher import AlertDispatcher, MatchedAlert
 from app.services.gate import PRIORITY_POLLER, CornellRequestGate
 from app.services.sse import SSEHub
@@ -110,6 +112,7 @@ class PollerEngine:
         self._backoff_until_mono: float = 0.0
         self._recent_rtts: deque[int] = deque(maxlen=50)
         self._meta_synced_mono: dict[tuple[str, str], float] = {}
+        self._manual_check_mono: dict[tuple[str, str], float] = {}
 
         self.telemetry: dict[str, Any] = {
             "state": "stopped",
@@ -139,8 +142,15 @@ class PollerEngine:
                 yield
 
     async def hydrate_from_db(self) -> None:
-        """Seed in-memory state map from cached SQLite sections so restarts catch missed flips."""
-        rows = await self.db.fetch_all("SELECT roster, class_nbr, open_status FROM roster_sections")
+        """Seed in-memory state map for active/recent/watched rosters so restarts catch missed flips."""
+        rows = await self.db.fetch_all(
+            """
+            SELECT roster, class_nbr, open_status
+            FROM roster_sections
+            WHERE roster IN (SELECT DISTINCT roster FROM watches)
+               OR roster IN (SELECT slug FROM rosters WHERE is_default = 1 OR archive_mode = 0)
+            """
+        )
         for r in rows:
             self.section_status[(str(r["roster"]).upper(), int(r["class_nbr"]))] = str(r["open_status"]).upper()
 
@@ -166,6 +176,8 @@ class PollerEngine:
                 await asyncio.wait_for(self._task, timeout=5.0)
             except asyncio.TimeoutError:
                 self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
             self._task = None
         self.telemetry["state"] = "stopped"
 
@@ -250,10 +262,9 @@ class PollerEngine:
                     await asyncio.sleep(min_interval - elapsed)
                     if self._stop_event.is_set():
                         break
-
-                buckets = await self._refresh_buckets()
-                if not buckets:
-                    continue
+                    buckets = await self._refresh_buckets()
+                    if not buckets:
+                        continue
                 target = self._select_next_bucket(buckets)
                 self.telemetry["state"] = "polling"
                 await self.poll_bucket(target.roster, target.subject)
@@ -270,9 +281,11 @@ class PollerEngine:
         subject_u = subject.upper()
 
         async with self._poll_lock:
-            self._last_request_mono = time.monotonic()
             try:
                 async with self._gate_slot():
+                    req_started = time.monotonic()
+                    self._last_request_mono = req_started
+                    self._manual_check_mono[(roster_u, subject_u)] = req_started
                     fetch_res = await self.provider.fetch_subject_classes(roster_u, subject_u)
             except RateLimitedError as exc:
                 self.telemetry["rate_limit_hits"] += 1
@@ -341,6 +354,30 @@ class PollerEngine:
                 "alerts_count": len(alerts),
             }
 
+    @staticmethod
+    async def _insert_status_events(
+        conn: Any,
+        roster_u: str,
+        subject_u: str,
+        flips: list[tuple[str, int, str, str, str]],
+        rtt_ms: int,
+    ) -> None:
+        if not flips:
+            return
+        await conn.executemany(
+            """
+            INSERT INTO status_events (
+                roster, subject, catalog_nbr, class_nbr, section_label,
+                old_status, new_status, poll_rtt_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (roster_u, subject_u, cat_nbr, cls_nbr, sec_lbl, old_st, new_st, rtt_ms)
+                for cat_nbr, cls_nbr, sec_lbl, old_st, new_st in flips
+            ],
+        )
+
     async def evaluate_courses(
         self,
         roster: str,
@@ -378,6 +415,8 @@ class PollerEngine:
                         raw_flips.append((course.catalog_nbr, sec.class_nbr, sec_lbl, prev_val, sec.open_status))
                 self.section_status[key] = sec.open_status
 
+        bucket_had_baseline = any(val is not None for val in prev_status_by_nbr.values())
+
         # Ensure catalog exists or incrementally update changed statuses in SQLite
         existing_meta = await self.db.fetch_one(
             "SELECT COUNT(*) AS cnt FROM courses_meta WHERE roster = ? AND subject = ?",
@@ -403,23 +442,14 @@ class PollerEngine:
         if not rows:
             if raw_flips:
                 async with self.db.write_tx() as conn:
-                    for cat_nbr, cls_nbr, sec_lbl, old_st, new_st in raw_flips:
-                        await conn.execute(
-                            """
-                            INSERT INTO status_events (
-                                roster, subject, catalog_nbr, class_nbr, section_label,
-                                old_status, new_status, poll_rtt_ms
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (roster_u, subject_u, cat_nbr, cls_nbr, sec_lbl, old_st, new_st, rtt_ms),
-                        )
+                    await self._insert_status_events(conn, roster_u, subject_u, raw_flips, rtt_ms)
             return []
 
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
         matched_alerts: list[MatchedAlert] = []
-        watch_updates: list[tuple[str, Optional[str], Optional[str], int, int]] = []
+        triggered_updates: list[tuple[str, str, str, int, int]] = []
+        obs_only_updates: list[tuple[str, int]] = []
         fired_groups: dict[tuple[int, str], int] = {}
 
         for row in rows:
@@ -443,13 +473,9 @@ class PollerEngine:
 
             in_cooldown = False
             if row["last_notified_at"] and cooldown_sec > 0:
-                try:
-                    last_dt = datetime.fromisoformat(row["last_notified_at"])
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                last_dt = parse_utc_dt(row["last_notified_at"])
+                if last_dt is not None:
                     in_cooldown = (now_dt - last_dt).total_seconds() < cooldown_sec
-                except ValueError:
-                    in_cooldown = False
 
             if mode == "exact":
                 c_nbr = row["class_nbr"]
@@ -483,11 +509,9 @@ class PollerEngine:
                         )
                     )
                     new_active = 0 if row["auto_pause"] else 1
-                    watch_updates.append((now_st, now_st, now_iso, new_active, row["id"]))
+                    triggered_updates.append((now_st, now_st, now_iso, new_active, row["id"]))
                 elif row["last_observed_status"] != now_st:
-                    watch_updates.append(
-                        (now_st, row["last_notified_status"], row["last_notified_at"], row["active"], row["id"])
-                    )
+                    obs_only_updates.append((now_st, row["id"]))
 
             elif mode == "linked_group":
                 c_nbr = row["class_nbr"]
@@ -510,7 +534,19 @@ class PollerEngine:
                 if triggered:
                     if group_token is not None:
                         fired_groups[group_token] = int(row["id"])
-                    prev_st = prev_status_by_nbr.get(sec.class_nbr) or "C"
+                    prev_st = prev_status_by_nbr.get(sec.class_nbr)
+                    if prev_st is None or prev_st in targets:
+                        comp_prev = next(
+                            (
+                                prev_status_by_nbr.get(s.class_nbr)
+                                for s in group_secs
+                                if s.open_status in targets
+                                and prev_status_by_nbr.get(s.class_nbr) is not None
+                                and prev_status_by_nbr.get(s.class_nbr) not in targets
+                            ),
+                            None,
+                        )
+                        prev_st = comp_prev or "C"
                     matched_alerts.append(
                         MatchedAlert(
                             watch=row,
@@ -523,11 +559,9 @@ class PollerEngine:
                         )
                     )
                     new_active = 0 if row["auto_pause"] else 1
-                    watch_updates.append((obs_label, sec.open_status, now_iso, new_active, row["id"]))
+                    triggered_updates.append((obs_label, sec.open_status, now_iso, new_active, row["id"]))
                 elif row["last_observed_status"] != obs_label:
-                    watch_updates.append(
-                        (obs_label, row["last_notified_status"], row["last_notified_at"], row["active"], row["id"])
-                    )
+                    obs_only_updates.append((obs_label, row["id"]))
 
             elif mode == "any_section":
                 candidates = course_sections_map.get(str(row["catalog_nbr"]), [])
@@ -551,11 +585,16 @@ class PollerEngine:
 
                 open_now = [s for _, s in matching_secs if s.open_status in targets]
                 newly_opened = [
-                    (c, s, prev_status_by_nbr.get(s.class_nbr))
+                    (c, s, prev_status_by_nbr.get(s.class_nbr) or "C")
                     for (c, s) in matching_secs
                     if s.open_status in targets
-                    and prev_status_by_nbr.get(s.class_nbr) is not None
-                    and prev_status_by_nbr.get(s.class_nbr) not in targets
+                    and (
+                        (
+                            prev_status_by_nbr.get(s.class_nbr) is not None
+                            and prev_status_by_nbr.get(s.class_nbr) not in targets
+                        )
+                        or (bucket_had_baseline and prev_status_by_nbr.get(s.class_nbr) is None)
+                    )
                 ]
                 obs_label = "OPEN_ANY" if open_now else "NONE_OPEN"
 
@@ -575,11 +614,9 @@ class PollerEngine:
                         )
                     )
                     new_active = 0 if row["auto_pause"] else 1
-                    watch_updates.append((obs_label, first_sec.open_status, now_iso, new_active, row["id"]))
+                    triggered_updates.append((obs_label, first_sec.open_status, now_iso, new_active, row["id"]))
                 elif row["last_observed_status"] != obs_label:
-                    watch_updates.append(
-                        (obs_label, row["last_notified_status"], row["last_notified_at"], row["active"], row["id"])
-                    )
+                    obs_only_updates.append((obs_label, row["id"]))
 
         alert_flip_keys = {(a.section.class_nbr, a.new_status) for a in matched_alerts}
         non_alert_flips = [
@@ -587,19 +624,24 @@ class PollerEngine:
         ]
         paused_group_events: list[tuple[int, str, int]] = []
 
-        if watch_updates or fired_groups or non_alert_flips:
+        if triggered_updates or obs_only_updates or fired_groups or non_alert_flips:
             async with self.db.write_tx() as conn:
-                for obs, notif_st, notif_at, act, wid in watch_updates:
-                    await conn.execute(
+                if triggered_updates:
+                    await conn.executemany(
                         """
                         UPDATE watches
                         SET last_observed_status = ?,
                             last_notified_status = ?,
                             last_notified_at = ?,
                             active = ?
-                        WHERE id = ?
+                        WHERE id = ? AND active = 1
                         """,
-                        (obs, notif_st, notif_at, act, wid),
+                        triggered_updates,
+                    )
+                if obs_only_updates:
+                    await conn.executemany(
+                        "UPDATE watches SET last_observed_status = ? WHERE id = ?",
+                        obs_only_updates,
                     )
                 for (uid, gkey), winner_id in fired_groups.items():
                     cur = await conn.execute(
@@ -615,22 +657,13 @@ class PollerEngine:
                     )
                     if (cur.rowcount or 0) > 0:
                         paused_group_events.append((uid, gkey, int(cur.rowcount)))
-                for cat_nbr, cls_nbr, sec_lbl, old_st, new_st in non_alert_flips:
-                    await conn.execute(
-                        """
-                        INSERT INTO status_events (
-                            roster, subject, catalog_nbr, class_nbr, section_label,
-                            old_status, new_status, poll_rtt_ms
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (roster_u, subject_u, cat_nbr, cls_nbr, sec_lbl, old_st, new_st, rtt_ms),
-                    )
+                await self._insert_status_events(conn, roster_u, subject_u, non_alert_flips, rtt_ms)
 
         for uid, gkey, cnt in paused_group_events:
             self.sse_hub.publish(
                 "watches_changed",
                 {"reason": "pick_one_group", "user_id": uid, "group_key": gkey, "paused_count": cnt},
+                user_ids={uid},
             )
 
         return matched_alerts

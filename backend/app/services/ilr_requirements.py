@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
+from app.services.common import (
+    decode_json_list,
+    format_credits_range,
+    to_float as _to_float,
+)
 from app.services.cs_requirements import normalize_course_code
 
 ILR_CURRICULUM_URL = (
@@ -223,42 +227,14 @@ def get_ilr_requirement_def(code: str) -> ILRRequirementDef:
     )
 
 
-def _safe_json_loads(raw: Any, default: Any) -> Any:
-    if isinstance(raw, (list, dict)):
-        return raw
-    if not raw or not isinstance(raw, str):
-        return default
-    try:
-        return json.loads(raw)
-    except Exception:
-        return default
-
-
-def _to_float(val: Any) -> Optional[float]:
-    if val is None or val == "":
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
-
-
 def _fmt_credits(units_min: Optional[float], units_max: Optional[float]) -> str:
-    lo = units_min if units_min is not None else units_max
-    hi = units_max if units_max is not None else units_min
-    if lo is None or hi is None:
-        return "? cr"
-
-    def _f(v: float) -> str:
-        return str(int(v)) if v.is_integer() else f"{v:g}"
-
-    return f"{_f(lo)} cr" if lo == hi else f"{_f(lo)}–{_f(hi)} cr"
+    return format_credits_range(units_min, units_max, suffix=" cr", sep="\u2013") or "? cr"
 
 
 def parse_ilr_codes_from_attrs(crse_attrs: Any) -> list[str]:
     """Extract sorted canonical '-IL' distribution codes from courses_meta.crse_attrs_json."""
-    items = _safe_json_loads(crse_attrs, [])
-    if not isinstance(items, list):
+    items = decode_json_list(crse_attrs)
+    if not items:
         return []
 
     found: set[str] = set()
@@ -278,9 +254,7 @@ def parse_ilr_codes_from_attrs(crse_attrs: Any) -> list[str]:
 
 
 def _extract_crosslist_codes(crosslists_json: Any) -> list[str]:
-    items = _safe_json_loads(crosslists_json, [])
-    if not isinstance(items, list):
-        return []
+    items = decode_json_list(crosslists_json)
     out: list[str] = []
     seen: set[str] = set()
     for item in items:
@@ -296,7 +270,8 @@ def _extract_crosslist_codes(crosslists_json: Any) -> list[str]:
     return out
 
 
-def _normalize_filter_codes(filter_codes: Sequence[str]) -> tuple[bool, list[str]]:
+def normalize_ilr_filter_codes(filter_codes: Sequence[str]) -> tuple[bool, list[str]]:
+    """Expand 'MAIN_3' & 'ANY_IL' ILR filter tokens into (has_any_il, explicit_codes)."""
     has_any_il = False
     explicit: list[str] = []
     seen: set[str] = set()
@@ -317,6 +292,9 @@ def _normalize_filter_codes(filter_codes: Sequence[str]) -> tuple[bool, list[str
             seen.add(token)
             explicit.append(token)
     return has_any_il, explicit
+
+
+_normalize_filter_codes = normalize_ilr_filter_codes
 
 
 @dataclass(frozen=True)
@@ -432,9 +410,7 @@ class ILRRequirementsIndex:
         )
 
     def _build(self, courses: Iterable[dict[str, Any]]) -> None:
-        raw_rows: list[dict[str, Any]] = []
         for row in courses:
-            raw_rows.append(row)
             elig = self.evaluate_course_row(row)
             if not elig.course_code:
                 continue

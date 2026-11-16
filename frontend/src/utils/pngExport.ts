@@ -4,6 +4,7 @@ import {
   computeScheduleDiagnostics,
   extractSectionSlots,
   formatMinutesShort,
+  getSelectedSections,
 } from "./schedulerSolver";
 
 const PALETTE: Array<{ bg: string; border: string; text: string; sub: string }> = [
@@ -102,27 +103,23 @@ function renderScheduleCanvas(
   }
 
   for (const c of courses) {
-    const selected = new Set(c.selected_class_nbrs);
     const courseLabel = `${c.subject} ${c.catalog_nbr}`;
-    for (const eg of c.enroll_groups) {
-      for (const sec of eg.sections) {
-        if (!selected.has(sec.class_nbr)) continue;
-        for (const sl of extractSectionSlots(courseLabel, sec)) {
-          minMin = Math.min(minMin, sl.start_min);
-          maxMin = Math.max(maxMin, sl.end_min);
-          if (sl.day === "Sa") hasSat = true;
-          if (sl.day === "Su") hasSun = true;
-          rawEvents.push({
-            day: sl.day,
-            startMin: sl.start_min,
-            endMin: sl.end_min,
-            title: courseLabel,
-            subtitle: `${sec.ssr_component} ${sec.section} #${sec.class_nbr}`,
-            room: sl.facility_descr || sec.instruction_mode || "",
-            isBlock: false,
-            colorIdx: c.color_idx,
-          });
-        }
+    for (const sec of getSelectedSections(c)) {
+      for (const sl of extractSectionSlots(courseLabel, sec)) {
+        minMin = Math.min(minMin, sl.start_min);
+        maxMin = Math.max(maxMin, sl.end_min);
+        if (sl.day === "Sa") hasSat = true;
+        if (sl.day === "Su") hasSun = true;
+        rawEvents.push({
+          day: sl.day,
+          startMin: sl.start_min,
+          endMin: sl.end_min,
+          title: courseLabel,
+          subtitle: `${sec.ssr_component} ${sec.section} #${sec.class_nbr}`,
+          room: sl.facility_descr || sec.instruction_mode || "",
+          isBlock: false,
+          colorIdx: c.color_idx,
+        });
       }
     }
   }
@@ -292,17 +289,6 @@ function triggerPngDownload(canvas: HTMLCanvasElement, filename: string): void {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-}
-
-export function downloadSchedulePNG(
-  schedule: HydratedSchedule,
-  coursesOverride?: ScheduleCourseItem[],
-  blocksOverride?: ScheduleBlock[]
-): void {
-  const canvas = renderScheduleCanvas(schedule, coursesOverride, blocksOverride);
-  if (!canvas) return;
-  const safeSlug = schedule.schedule.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "schedule";
-  triggerPngDownload(canvas, `${safeSlug}-${schedule.schedule.roster}.png`);
 }
 
 /**

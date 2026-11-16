@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Optional
 
+from app.services.common import (
+    normalize_course_code_loose as normalize_course_code,
+    parse_catalog_num,
+    parse_json_value,
+)
 from app.services.minors_data import (
     MINORS_BY_ID,
     MINORS_REGISTRY,
@@ -14,8 +18,6 @@ from app.services.minors_data import (
     MinorDef,
     MinorVersionDef,
 )
-
-_COURSE_CODE_RE = re.compile(r"^([A-Za-z]+)\s*[- ]?\s*(\d+[A-Za-z]?)$")
 
 _BME_EXCLUDED_NBRS = frozenset(
     {"4660", "4661", "4665", "4960", "4970", "4975", "4980", "4990", "4992", "4993"}
@@ -39,43 +41,6 @@ _MINOR_WARNINGS: dict[str, dict[str, str]] = {
         "PSYCH 4710": "Maximum 6 credits total across PSYCH 4700 and PSYCH 4710 can count toward the 15-credit minor.",
     },
 }
-
-
-def normalize_course_code(raw: str) -> str:
-    """Normalize a Cornell course code like 'pam-2300' into 'PAM 2300'."""
-    text = str(raw or "").strip().upper()
-    if not text:
-        return ""
-    match = _COURSE_CODE_RE.match(text)
-    if match:
-        return f"{match.group(1)} {match.group(2)}"
-    parts = text.split()
-    if len(parts) >= 2:
-        return f"{parts[0]} {parts[1]}"
-    return text
-
-
-def parse_json_value(raw: Any, default: Any) -> Any:
-    """Decode JSON text safely, returning native collections untouched."""
-    if raw is None or raw == "":
-        return default
-    if isinstance(raw, (list, dict)):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return default
-        return parsed
-    return default
-
-
-def parse_catalog_num(catalog_nbr: str, fallback: Any = None) -> int:
-    """Parse leading integer course number from catalog_nbr or fallback."""
-    if isinstance(fallback, (int, float)) and int(fallback) > 0:
-        return int(fallback)
-    match = re.match(r"(\d+)", str(catalog_nbr or "").strip())
-    return int(match.group(1)) if match else 0
 
 
 def expand_code_with_aliases(subject: str, nbr: str) -> list[str]:

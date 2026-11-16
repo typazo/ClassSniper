@@ -238,11 +238,6 @@ export const api = {
     });
     return request<IlrSummaryResponse>(`/api/ilr/summary?${params.toString()}`);
   },
-  refreshSubjects: (roster: string, subjects: string[]) =>
-    request<{ roster: string; queued: string[] }>("/api/courses/refresh-subjects", {
-      method: "POST",
-      body: JSON.stringify({ roster, subjects }),
-    }),
   getCourseInsights: (roster: string, subject: string, catalogNbr: string, refresh = false) =>
     request<CourseInsights>(
       `/api/courses/${encodeURIComponent(roster)}/${encodeURIComponent(subject)}/${encodeURIComponent(catalogNbr)}/insights${

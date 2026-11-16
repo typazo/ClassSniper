@@ -11,6 +11,7 @@ from statistics import median
 from typing import Any
 
 from app.db import Database
+from app.services.common import chunk_list, parse_utc_dt as parse_event_dt
 
 _TIER_LABELS: dict[str, str] = {
     "high": "High",
@@ -19,30 +20,6 @@ _TIER_LABELS: dict[str, str] = {
     "none": "0 Drops",
     "untracked": "Tracking",
 }
-
-
-def parse_event_dt(ts: str | None) -> datetime | None:
-    """Parse SQLite or ISO-8601 UTC timestamp strings into aware datetimes."""
-    if not ts:
-        return None
-    raw = str(ts).strip()
-    if not raw:
-        return None
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
-        try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
 
 
 def _format_duration_short(seconds: float | None) -> str:
@@ -59,73 +36,85 @@ def _format_duration_short(seconds: float | None) -> str:
     return f"{h}h {m}m" if m else f"{h}h"
 
 
-def compute_window_stats(
+def compute_all_window_stats(
     events: list[dict[str, Any]],
-    cutoff: datetime | None = None,
-) -> dict[str, Any]:
-    """Compute flip counts and open-window duration stats for an event slice."""
+    cutoffs: dict[str, datetime | None],
+) -> dict[str, dict[str, Any]]:
+    """Compute turnover stats across multiple time cutoffs in a single timestamp parse/sort pass."""
     parsed: list[tuple[datetime, dict[str, Any]]] = []
     for ev in events:
         dt = parse_event_dt(ev.get("detected_at"))
-        if dt is None:
-            continue
-        parsed.append((dt, ev))
+        if dt is not None:
+            parsed.append((dt, ev))
 
     parsed.sort(key=lambda item: (item[0], int(item[1].get("id") or 0)))
 
-    # Track completed O -> (C|W) durations across full history, attributing each
-    # closed episode to its close timestamp (or open timestamp) within cutoff.
+    acc: dict[str, dict[str, Any]] = {
+        key: {
+            "total_flips": 0,
+            "opened_count": 0,
+            "closed_count": 0,
+            "waitlisted_count": 0,
+            "durations_sec": [],
+            "last_opened_at": None,
+            "last_flip_at": None,
+        }
+        for key in cutoffs
+    }
     open_started_at: dict[int, datetime] = {}
-    durations_sec: list[float] = []
-
-    total_flips = 0
-    opened_count = 0
-    closed_count = 0
-    waitlisted_count = 0
-    last_opened_at: str | None = None
-    last_flip_at: str | None = None
 
     for dt, ev in parsed:
         class_nbr = int(ev.get("class_nbr") or 0)
         new_s = str(ev.get("new_status") or "").upper()
-        in_window = cutoff is None or dt >= cutoff
+        iso_ts = dt.isoformat()
 
+        closed_elapsed: float | None = None
         if new_s == "O":
             if class_nbr not in open_started_at:
                 open_started_at[class_nbr] = dt
         elif new_s in ("C", "W"):
             started = open_started_at.pop(class_nbr, None)
-            if started is not None and in_window:
-                elapsed = max(0.0, (dt - started).total_seconds())
-                durations_sec.append(elapsed)
+            if started is not None:
+                closed_elapsed = max(0.0, (dt - started).total_seconds())
 
-        if not in_window:
-            continue
+        for key, cutoff in cutoffs.items():
+            if cutoff is not None and dt < cutoff:
+                continue
+            bucket = acc[key]
+            if closed_elapsed is not None:
+                bucket["durations_sec"].append(closed_elapsed)
+            bucket["total_flips"] += 1
+            bucket["last_flip_at"] = iso_ts
+            if new_s == "O":
+                bucket["opened_count"] += 1
+                bucket["last_opened_at"] = iso_ts
+            elif new_s == "C":
+                bucket["closed_count"] += 1
+            elif new_s == "W":
+                bucket["waitlisted_count"] += 1
 
-        total_flips += 1
-        iso_ts = dt.isoformat()
-        last_flip_at = iso_ts
-        if new_s == "O":
-            opened_count += 1
-            last_opened_at = iso_ts
-        elif new_s == "C":
-            closed_count += 1
-        elif new_s == "W":
-            waitlisted_count += 1
+    out: dict[str, dict[str, Any]] = {}
+    for key, bucket in acc.items():
+        durations = bucket["durations_sec"]
+        out[key] = {
+            "total_flips": bucket["total_flips"],
+            "opened_count": bucket["opened_count"],
+            "closed_count": bucket["closed_count"],
+            "waitlisted_count": bucket["waitlisted_count"],
+            "avg_open_sec": round(sum(durations) / len(durations), 1) if durations else None,
+            "median_open_sec": round(float(median(durations)), 1) if durations else None,
+            "last_opened_at": bucket["last_opened_at"],
+            "last_flip_at": bucket["last_flip_at"],
+        }
+    return out
 
-    avg_open_sec = round(sum(durations_sec) / len(durations_sec), 1) if durations_sec else None
-    median_open_sec = round(float(median(durations_sec)), 1) if durations_sec else None
 
-    return {
-        "total_flips": total_flips,
-        "opened_count": opened_count,
-        "closed_count": closed_count,
-        "waitlisted_count": waitlisted_count,
-        "avg_open_sec": avg_open_sec,
-        "median_open_sec": median_open_sec,
-        "last_opened_at": last_opened_at,
-        "last_flip_at": last_flip_at,
-    }
+def compute_window_stats(
+    events: list[dict[str, Any]],
+    cutoff: datetime | None = None,
+) -> dict[str, Any]:
+    """Compute flip counts and open-window duration stats for an event slice."""
+    return compute_all_window_stats(events, {"w": cutoff})["w"]
 
 
 def compute_tracking_days(
@@ -174,17 +163,15 @@ def _classify_drop_tier(
     return "untracked"
 
 
-def compute_drop_odds(
-    events: list[dict[str, Any]],
+def compute_drop_odds_from_windows(
+    windows: dict[str, dict[str, Any]],
     tracking_days: float = 0.0,
-    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Compute Drop Odds tier, counts, durations, and summary from real events."""
-    now_dt = now or datetime.now(timezone.utc)
-    s24 = compute_window_stats(events, now_dt - timedelta(hours=24))
-    s7 = compute_window_stats(events, now_dt - timedelta(days=7))
-    s30 = compute_window_stats(events, now_dt - timedelta(days=30))
-    s_all = compute_window_stats(events, None)
+    """Assemble Drop Odds payload from precomputed 24h/7d/30d/all window stats."""
+    s24 = windows["24h"]
+    s7 = windows["7d"]
+    s30 = windows["30d"]
+    s_all = windows["all"]
 
     opened_24h = int(s24["opened_count"])
     opened_7d = int(s7["opened_count"])
@@ -237,6 +224,25 @@ def compute_drop_odds(
         "tracking_days": td,
         "summary": summary,
     }
+
+
+def compute_drop_odds(
+    events: list[dict[str, Any]],
+    tracking_days: float = 0.0,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Compute Drop Odds tier, counts, durations, and summary from real events."""
+    now_dt = now or datetime.now(timezone.utc)
+    windows = compute_all_window_stats(
+        events,
+        {
+            "24h": now_dt - timedelta(hours=24),
+            "7d": now_dt - timedelta(days=7),
+            "30d": now_dt - timedelta(days=30),
+            "all": None,
+        },
+    )
+    return compute_drop_odds_from_windows(windows, tracking_days=tracking_days)
 
 
 async def fetch_course_drop_odds_map(
@@ -333,19 +339,20 @@ async def fetch_drop_leaderboard(
         for r in subj_rows
     }
 
-    course_keys = sorted(by_course.keys())
-    course_ph = " OR ".join("(roster = ? AND subject = ? AND catalog_nbr = ?)" for _ in course_keys)
-    course_params: list[Any] = []
-    for r_u, s_u, cat in course_keys:
-        course_params.extend([r_u, s_u, cat])
-    course_rows = await db.fetch_all(
-        f"SELECT roster, subject, catalog_nbr, title_short FROM courses_meta WHERE {course_ph}",
-        tuple(course_params),
-    )
-    titles: dict[tuple[str, str, str], str] = {
-        (str(r["roster"]).upper(), str(r["subject"]).upper(), str(r["catalog_nbr"])): str(r.get("title_short") or "")
-        for r in course_rows
-    }
+    titles: dict[tuple[str, str, str], str] = {}
+    for chunk in chunk_list(sorted(by_course.keys()), 200):
+        course_ph = " OR ".join("(roster = ? AND subject = ? AND catalog_nbr = ?)" for _ in chunk)
+        course_params: list[Any] = []
+        for r_u, s_u, cat in chunk:
+            course_params.extend([r_u, s_u, cat])
+        course_rows = await db.fetch_all(
+            f"SELECT roster, subject, catalog_nbr, title_short FROM courses_meta WHERE {course_ph}",
+            tuple(course_params),
+        )
+        for r in course_rows:
+            titles[(str(r["roster"]).upper(), str(r["subject"]).upper(), str(r["catalog_nbr"]))] = str(
+                r.get("title_short") or ""
+            )
 
     entries: list[dict[str, Any]] = []
     for (r_u, s_u, cat), evs in by_course.items():

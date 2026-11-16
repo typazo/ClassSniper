@@ -12,6 +12,7 @@ import {
   formatMinutesFull,
   formatMinutesShort,
   getCourseColor,
+  getSelectedSections,
   sectionOverlapsSlots,
   type ScheduleDiagnostics,
   type TimeSlot,
@@ -361,19 +362,15 @@ export function WeeklyCalendarGrid({
           }
         }
         for (const c of activeCourses) {
-          const chosen = new Set(c.selected_class_nbrs);
-          for (const eg of c.enroll_groups) {
-            for (const s of eg.sections) {
-              if (!chosen.has(s.class_nbr)) continue;
-              if (c.id === targetCourse.id && s.class_nbr === targetSec.class_nbr) continue;
-              const dest =
-                c.id === targetCourse.id ? occupiedSameCourseOther : occupiedExternal;
-              for (const sl of extractSectionSlots(
-                `${c.subject} ${c.catalog_nbr}`,
-                s
-              )) {
-                dest.push(sl);
-              }
+          for (const s of getSelectedSections(c)) {
+            if (c.id === targetCourse.id && s.class_nbr === targetSec.class_nbr) continue;
+            const dest =
+              c.id === targetCourse.id ? occupiedSameCourseOther : occupiedExternal;
+            for (const sl of extractSectionSlots(
+              `${c.subject} ${c.catalog_nbr}`,
+              s
+            )) {
+              dest.push(sl);
             }
           }
         }
@@ -454,6 +451,7 @@ export function WeeklyCalendarGrid({
     const el = gridBodyRef.current;
     if (!el) return gridStartMin;
     const rect = el.getBoundingClientRect();
+    if (rect.height <= 0) return gridStartMin;
     const relY = Math.max(0, Math.min(rect.height, clientY - rect.top));
     const rawMin = gridStartMin + (relY / rect.height) * totalMinutes;
     const snapped = Math.round(rawMin / 15) * 15;
@@ -483,10 +481,19 @@ export function WeeklyCalendarGrid({
     }
   };
 
+  const handleColumnPointerCancel = () => {
+    setDragState(null);
+  };
+
+  const effectiveMobileDayFilter: "all" | DayCode =
+    mobileDayFilter === "all" || visibleDays.some((d) => d.code === mobileDayFilter)
+      ? mobileDayFilter
+      : "all";
+
   const shownDays =
-    mobileDayFilter === "all"
+    effectiveMobileDayFilter === "all"
       ? visibleDays
-      : visibleDays.filter((d) => d.code === mobileDayFilter);
+      : visibleDays.filter((d) => d.code === effectiveMobileDayFilter);
 
   return (
     <div className="space-y-3">
@@ -524,7 +531,7 @@ export function WeeklyCalendarGrid({
             type="button"
             onClick={() => setMobileDayFilter("all")}
             className={`rounded-lg px-2.5 py-1 text-xs font-medium ${
-              mobileDayFilter === "all"
+              effectiveMobileDayFilter === "all"
                 ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40"
                 : "bg-zinc-900 text-zinc-400"
             }`}
@@ -537,7 +544,7 @@ export function WeeklyCalendarGrid({
               type="button"
               onClick={() => setMobileDayFilter(d.code)}
               className={`rounded-lg px-2.5 py-1 text-xs font-medium ${
-                mobileDayFilter === d.code
+                effectiveMobileDayFilter === d.code
                   ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40"
                   : "bg-zinc-900 text-zinc-400"
               }`}
@@ -550,7 +557,7 @@ export function WeeklyCalendarGrid({
 
       {/* Calendar Container */}
       <div className="overflow-x-auto rounded-2xl border border-zinc-800 bg-zinc-900/75 shadow-inner">
-        <div className={mobileDayFilter === "all" ? "min-w-[640px]" : "min-w-full"}>
+        <div className={effectiveMobileDayFilter === "all" ? "min-w-[640px]" : "min-w-full"}>
           {/* Day Headers */}
           <div
             className="grid border-b border-zinc-800 bg-zinc-950/60"
@@ -614,6 +621,7 @@ export function WeeklyCalendarGrid({
                   onPointerDown={(e) => handleColumnPointerDown(d.code, e)}
                   onPointerMove={(e) => handleColumnPointerMove(d.code, e)}
                   onPointerUp={() => handleColumnPointerUp(d.code)}
+                  onPointerCancel={handleColumnPointerCancel}
                   className={`relative border-r border-zinc-800/60 last:border-r-0 ${
                     !readOnly && onCreateBlock ? "cursor-crosshair" : ""
                   }`}
@@ -819,8 +827,9 @@ export function WeeklyCalendarGrid({
                       );
                     })}
 
-                  {/* Click-Block Ghost Swap Alternatives Layer */}
-                  {swapInfo &&
+                  {/* Click-Block Ghost Swap Alternatives Layer (hidden during sidebar hover preview to prevent overlap) */}
+                  {!activeHoverPreview &&
+                    swapInfo &&
                     (swapGhostsByDay.get(d.code) || []).map((g, gIdx) => {
                       const topPct = ((g.startMin - gridStartMin) / totalMinutes) * 100;
                       const heightPct = Math.max(

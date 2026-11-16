@@ -9,57 +9,10 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { IlrMatchMode, IlrRequirementSummary, IlrSummaryResponse } from "../types";
-
-const TONE_PILL_MAP: Record<string, { base: string; active: string }> = {
-  sky: {
-    base: "bg-sky-500/10 border-sky-500/30 text-sky-300",
-    active: "bg-sky-500/25 border-sky-400 text-sky-100 ring-1 ring-sky-400/50",
-  },
-  amber: {
-    base: "bg-amber-500/10 border-amber-500/30 text-amber-300",
-    active: "bg-amber-500/25 border-amber-400 text-amber-100 ring-1 ring-amber-400/50",
-  },
-  emerald: {
-    base: "bg-emerald-500/10 border-emerald-500/30 text-emerald-300",
-    active: "bg-emerald-500/25 border-emerald-400 text-emerald-100 ring-1 ring-emerald-400/50",
-  },
-  violet: {
-    base: "bg-violet-500/10 border-violet-500/30 text-violet-300",
-    active: "bg-violet-500/25 border-violet-400 text-violet-100 ring-1 ring-violet-400/50",
-  },
-  rose: {
-    base: "bg-rose-500/10 border-rose-500/30 text-rose-300",
-    active: "bg-rose-500/25 border-rose-400 text-rose-100 ring-1 ring-rose-400/50",
-  },
-  cyan: {
-    base: "bg-cyan-500/10 border-cyan-500/30 text-cyan-300",
-    active: "bg-cyan-500/25 border-cyan-400 text-cyan-100 ring-1 ring-cyan-400/50",
-  },
-  fuchsia: {
-    base: "bg-fuchsia-500/10 border-fuchsia-500/30 text-fuchsia-300",
-    active: "bg-fuchsia-500/25 border-fuchsia-400 text-fuchsia-100 ring-1 ring-fuchsia-400/50",
-  },
-  teal: {
-    base: "bg-teal-500/10 border-teal-500/30 text-teal-300",
-    active: "bg-teal-500/25 border-teal-400 text-teal-100 ring-1 ring-teal-400/50",
-  },
-  indigo: {
-    base: "bg-indigo-500/10 border-indigo-500/30 text-indigo-300",
-    active: "bg-indigo-500/25 border-indigo-400 text-indigo-100 ring-1 ring-indigo-400/50",
-  },
-  slate: {
-    base: "bg-slate-500/10 border-slate-500/30 text-slate-300",
-    active: "bg-slate-500/25 border-slate-400 text-slate-100 ring-1 ring-slate-400/50",
-  },
-  zinc: {
-    base: "bg-zinc-700/30 border-zinc-600/50 text-zinc-300",
-    active: "bg-zinc-700/70 border-zinc-400 text-zinc-100 ring-1 ring-zinc-400/50",
-  },
-};
+import { toneClasses } from "../utils/courseFormat";
 
 export function ilrToneClasses(tone: string, active = false): string {
-  const entry = TONE_PILL_MAP[tone] || TONE_PILL_MAP.slate;
-  return active ? entry.active : entry.base;
+  return toneClasses(tone, active ? "pillActive" : "pill");
 }
 
 const MAIN_CODES = ["ICL-IL", "LH-IL", "QP-IL"];
@@ -135,7 +88,7 @@ export const IlrDistributionExplorer: React.FC<Props> = ({
   onToggleMultiOnly,
   onSyncPrioritySubjects,
 }) => {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   const grouped = useMemo(() => {
     const reqs = summary?.requirements ?? [];

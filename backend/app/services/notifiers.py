@@ -237,7 +237,16 @@ class DiscordWebhookNotifier:
                 error_text="Invalid Discord webhook URL",
             )
         try:
-            resp = await self._client.post(webhook_url.strip(), json=payload)
+            url = webhook_url.strip()
+            resp = await self._client.post(url, json=payload)
+            if resp.status_code == 429:
+                try:
+                    retry_after = float(resp.headers.get("Retry-After") or resp.json().get("retry_after") or 0)
+                except Exception:
+                    retry_after = 0.0
+                if 0 < retry_after <= 2.5:
+                    await asyncio.sleep(retry_after)
+                    resp = await self._client.post(url, json=payload)
             latency_ms = max(1, int((time.perf_counter() - started) * 1000))
             if 200 <= resp.status_code < 300:
                 return DeliveryOutcome(

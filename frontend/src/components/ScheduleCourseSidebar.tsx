@@ -12,6 +12,7 @@ import {
   Trash2,
   Unlock,
 } from "lucide-react";
+import { useCopyFeedback } from "../hooks/useCopyFeedback";
 import type {
   DayCode,
   ScheduleBlock,
@@ -24,10 +25,11 @@ import {
   findCompatibleSectionsForCourse,
   formatMinutesShort,
   getCourseColor,
-  selectSectionInCourse,
+  getCourseEffectiveUnits,
+  getSelectedSections,
+  swapSectionPreservingLocks,
+  WEEKDAY_ORDER,
 } from "../utils/schedulerSolver";
-
-const ALL_DAYS: DayCode[] = ["M", "T", "W", "R", "F"];
 
 interface Props {
   courses: ScheduleCourseItem[];
@@ -72,7 +74,7 @@ export function ScheduleCourseSidebar({
   onToggleBlock,
   onDeleteBlock,
 }: Props) {
-  const [copiedNbr, setCopiedNbr] = useState<number | null>(null);
+  const { copiedKey, copy } = useCopyFeedback<number>(1200);
   const [showBlockForm, setShowBlockForm] = useState(false);
   const [blockLabel, setBlockLabel] = useState("Busy");
   const [blockDays, setBlockDays] = useState<DayCode[]>(["M", "W", "F"]);
@@ -86,12 +88,6 @@ export function ScheduleCourseSidebar({
     }
     return map;
   }, [courses, blocks]);
-
-  const copyClassNbr = (nbr: number) => {
-    navigator.clipboard?.writeText(String(nbr));
-    setCopiedNbr(nbr);
-    setTimeout(() => setCopiedNbr((cur) => (cur === nbr ? null : cur)), 1200);
-  };
 
   const parseHHMM = (val: string): number => {
     const [h, m] = val.split(":").map(Number);
@@ -133,9 +129,7 @@ export function ScheduleCourseSidebar({
             const isExpanded = expandedCourseId === course.id;
             const selectedSet = new Set(course.selected_class_nbrs);
             const lockedSet = new Set(course.locked_class_nbrs);
-            const selectedSections = course.enroll_groups.flatMap((eg) =>
-              eg.sections.filter((s) => selectedSet.has(s.class_nbr))
-            );
+            const selectedSections = getSelectedSections(course);
             const compat = compatibilityByCourse.get(course.id);
             const compatibleWatchTargets = course.enroll_groups.flatMap((eg) =>
               eg.sections.filter(
@@ -146,10 +140,7 @@ export function ScheduleCourseSidebar({
             );
             const variableCredits =
               course.units_max > 0 && course.units_max > course.units_min;
-            const effUnits =
-              course.selected_units != null
-                ? course.selected_units
-                : course.units_max || course.units_min;
+            const effUnits = getCourseEffectiveUnits(course);
 
             const creditChoices: number[] = [];
             if (variableCredits) {
@@ -320,14 +311,14 @@ export function ScheduleCourseSidebar({
                           </span>
                           <button
                             type="button"
-                            onClick={() => copyClassNbr(sec.class_nbr)}
+                            onClick={() => void copy(String(sec.class_nbr), sec.class_nbr)}
                             title="Copy class number"
                             className="inline-flex items-center gap-0.5 font-mono text-[10px] text-zinc-400 hover:text-emerald-300"
                           >
                             #{sec.class_nbr}
                             <Copy className="h-2.5 w-2.5" />
                           </button>
-                          {copiedNbr === sec.class_nbr && (
+                          {copiedKey === sec.class_nbr && (
                             <span className="text-[10px] text-emerald-400">Copied</span>
                           )}
                           <StatusBadge status={sec.open_status} />
@@ -417,8 +408,7 @@ export function ScheduleCourseSidebar({
                                       onMouseLeave={() => onHoverSection(null)}
                                       onClick={() => {
                                         onHoverSection(null);
-                                        const nextNbrs = selectSectionInCourse(course, sec);
-                                        onUpdateCourse(course.id, { selected_class_nbrs: nextNbrs });
+                                        onUpdateCourse(course.id, swapSectionPreservingLocks(course, sec));
                                       }}
                                       className={`flex w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 text-left text-xs transition ${
                                         isSelected
@@ -574,7 +564,7 @@ export function ScheduleCourseSidebar({
               className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
             />
             <div className="flex flex-wrap gap-1">
-              {ALL_DAYS.map((d) => {
+              {WEEKDAY_ORDER.map((d) => {
                 const active = blockDays.includes(d);
                 return (
                   <button

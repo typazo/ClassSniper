@@ -3,7 +3,10 @@ import { ArrowLeftRight, Loader2, X } from "lucide-react";
 import { api } from "../api/client";
 import type { HydratedSchedule, ScheduleCourseItem, ScheduleSummary } from "../types";
 import { summarizeScheduleInsights } from "../utils/scheduleInsights";
-import { computeScheduleDiagnostics } from "../utils/schedulerSolver";
+import {
+  computeScheduleDiagnostics,
+  getSelectedSections,
+} from "../utils/schedulerSolver";
 
 interface Props {
   isOpen: boolean;
@@ -18,13 +21,9 @@ function summarizePlan(sched: HydratedSchedule) {
   let openSecs = 0;
   let totalSecs = 0;
   for (const c of enabled) {
-    const sel = new Set(c.selected_class_nbrs);
-    for (const eg of c.enroll_groups) {
-      for (const s of eg.sections) {
-        if (!sel.has(s.class_nbr)) continue;
-        totalSecs += 1;
-        if (s.open_status === "O") openSecs += 1;
-      }
+    for (const s of getSelectedSections(c)) {
+      totalSecs += 1;
+      if (s.open_status === "O") openSecs += 1;
     }
   }
   const insights = summarizeScheduleInsights(enabled);
@@ -40,15 +39,9 @@ function summarizePlan(sched: HydratedSchedule) {
 }
 
 function formatSelectedSections(course: ScheduleCourseItem): string {
-  const chosen = new Set(course.selected_class_nbrs);
-  const parts: string[] = [];
-  for (const eg of course.enroll_groups) {
-    for (const s of eg.sections) {
-      if (chosen.has(s.class_nbr)) {
-        parts.push(`${s.ssr_component} ${s.section} (#${s.class_nbr})`);
-      }
-    }
-  }
+  const parts = getSelectedSections(course).map(
+    (s) => `${s.ssr_component} ${s.section} (#${s.class_nbr})`
+  );
   return parts.join(", ") || "No sections selected";
 }
 
@@ -68,14 +61,25 @@ export function ScheduleDiffModal({ isOpen, active, schedules, onClose }: Props)
   useEffect(() => {
     if (!isOpen || !otherId) {
       setOtherSchedule(null);
+      setLoading(false);
       return;
     }
+    let cancelled = false;
     setLoading(true);
     api
       .getSchedule(otherId)
-      .then((res) => setOtherSchedule(res))
-      .catch(() => setOtherSchedule(null))
-      .finally(() => setLoading(false));
+      .then((res) => {
+        if (!cancelled) setOtherSchedule(res);
+      })
+      .catch(() => {
+        if (!cancelled) setOtherSchedule(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, otherId]);
 
   if (!isOpen) return null;
@@ -162,13 +166,16 @@ export function ScheduleDiffModal({ isOpen, active, schedules, onClose }: Props)
                         {rightStats.totalSecs}
                       </div>
                     </div>
-                    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">
-                      <div className="text-[10px] text-zinc-400">Semester Diff / Work</div>
+                    <div
+                      className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5"
+                      title="Composite Semester Load (credit-weighted difficulty & workload vs 15 cr); Avg Diff in parentheses"
+                    >
+                      <div className="text-[10px] text-zinc-400">Semester Load</div>
                       <div className="mt-0.5 font-semibold text-white">
-                        {leftStats.avgDifficulty != null ? `${leftStats.avgDifficulty}/5` : "—"}
-                        {leftStats.avgWorkload != null ? ` (${leftStats.avgWorkload})` : ""} vs{" "}
-                        {rightStats.avgDifficulty != null ? `${rightStats.avgDifficulty}/5` : "—"}
-                        {rightStats.avgWorkload != null ? ` (${rightStats.avgWorkload})` : ""}
+                        {leftStats.semesterLoadScore != null ? `${leftStats.semesterLoadScore.toFixed(1)}/5` : "—"}
+                        {leftStats.avgDifficulty != null ? ` (Diff ${leftStats.avgDifficulty})` : ""} vs{" "}
+                        {rightStats.semesterLoadScore != null ? `${rightStats.semesterLoadScore.toFixed(1)}/5` : "—"}
+                        {rightStats.avgDifficulty != null ? ` (Diff ${rightStats.avgDifficulty})` : ""}
                       </div>
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5">

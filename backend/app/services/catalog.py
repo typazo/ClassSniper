@@ -8,7 +8,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Iterable, Optional
 
 import orjson
 
@@ -21,7 +21,12 @@ from app.services.attributes import (
     normalize_attr_code,
     summarize_roster_attributes,
 )
-from app.services.cs_checklist import format_credits_range
+from app.services.common import (
+    chunk_list,
+    decode_json_list as _decode_json_list,
+    format_credits_range,
+    parse_utc_dt as _parse_utc_dt,
+)
 from app.services.drop_odds import fetch_course_drop_odds_map
 from app.services.minors import (
     build_minors_catalog,
@@ -39,6 +44,7 @@ from app.services.ilr_requirements import (
     ILRRequirementsIndex,
     PRIORITY_ILR_PREREQ_SUBJECTS,
     PRIORITY_ILR_SUBJECTS,
+    normalize_ilr_filter_codes,
 )
 from app.services.gate import PRIORITY_SEARCH, PRIORITY_WARMUP, CornellRequestGate
 from app.services.insights import build_external_links
@@ -64,31 +70,6 @@ def _escape_like(token: str) -> str:
     return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _parse_utc_dt(raw: Optional[str]) -> Optional[datetime]:
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.strip())
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _decode_json_list(raw: Any) -> list[Any]:
-    if isinstance(raw, list):
-        return raw
-    if isinstance(raw, str) and raw:
-        try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, list):
-                return loaded
-        except ValueError:
-            pass
-    return []
-
-
 class CatalogSyncService:
     """Maintains cached rosters, subjects, courses, CS eligibility index, and lazy live refreshes."""
 
@@ -112,6 +93,7 @@ class CatalogSyncService:
         self._catalog_generation: dict[str, int] = {}
         self._cs_index_cache: dict[str, tuple[int, CSRequirementsIndex]] = {}
         self._ilr_index_cache: dict[str, tuple[int, ILRRequirementsIndex]] = {}
+        self._minors_rows_cache: dict[str, tuple[int, list[dict[str, Any]]]] = {}
 
         self._refresh_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=200)
         self._refresh_pending: set[tuple[str, str]] = set()
@@ -133,9 +115,6 @@ class CatalogSyncService:
 
     def set_poller(self, poller: Any) -> None:
         self._poller = poller
-
-    def set_sse_hub(self, sse_hub: SSEHub) -> None:
-        self.sse_hub = sse_hub
 
     def start_workers(self) -> None:
         """Start lazy visible-subject refresh consumer and STEM-first background warmer."""
@@ -199,8 +178,19 @@ class CatalogSyncService:
         active_rosters: list[str] = []
 
         async with self.db.write_tx() as conn:
-            for r in rosters:
-                await conn.execute(
+            roster_params = [
+                (
+                    r.slug,
+                    r.descr,
+                    1 if r.is_default else 0,
+                    1 if r.archive_mode else 0,
+                    r.strm,
+                    r.last_modified_dttm,
+                )
+                for r in rosters
+            ]
+            if roster_params:
+                await conn.executemany(
                     """
                     INSERT INTO rosters (slug, descr, is_default, archive_mode, strm, last_modified_dttm, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
@@ -212,31 +202,25 @@ class CatalogSyncService:
                         last_modified_dttm = excluded.last_modified_dttm,
                         updated_at = datetime('now')
                     """,
-                    (
-                        r.slug,
-                        r.descr,
-                        1 if r.is_default else 0,
-                        1 if r.archive_mode else 0,
-                        r.strm,
-                        r.last_modified_dttm,
-                    ),
+                    roster_params,
                 )
+            for r in rosters:
                 if not r.archive_mode or r.is_default:
                     active_rosters.append(r.slug)
 
         target_rosters = [roster_filter.upper()] if roster_filter else (active_rosters or [r.slug for r in rosters[-2:]])
         for slug in target_rosters:
             subjects = await self.provider.fetch_subjects(slug)
-            async with self.db.write_tx() as conn:
-                for s in subjects:
-                    await conn.execute(
+            if subjects:
+                async with self.db.write_tx() as conn:
+                    await conn.executemany(
                         """
                         INSERT INTO subjects (roster, value, descr)
                         VALUES (?, ?, ?)
                         ON CONFLICT(roster, value) DO UPDATE SET
                             descr = excluded.descr
                         """,
-                        (slug, s.value, s.descr),
+                        [(slug, s.value, s.descr) for s in subjects],
                     )
 
         self.status["rosters_count"] = len(rosters)
@@ -284,6 +268,10 @@ class CatalogSyncService:
                 (roster_u, subject_u),
             )
 
+            meta_rows_batch: list[tuple[Any, ...]] = []
+            sec_rows_batch: list[tuple[Any, ...]] = []
+            fts_rows_batch: list[tuple[Any, ...]] = []
+
             for c in courses:
                 derived = compute_course_derived_fields(c.catalog_nbr, c.enroll_groups, c.sections)
                 catalog_num = c.catalog_num or derived["catalog_num"]
@@ -295,23 +283,7 @@ class CatalogSyncService:
                 crosslists = c.crosslists or derived["crosslists"]
                 components = c.components or derived["components"]
 
-                eg_json = orjson.dumps(c.enroll_groups).decode("utf-8")
-                crse_attrs_json = orjson.dumps(c.crse_attrs).decode("utf-8")
-                crosslists_json = json.dumps(crosslists)
-                components_json = json.dumps(components)
-
-                await conn.execute(
-                    """
-                    INSERT INTO courses_meta (
-                        roster, subject, catalog_nbr, title_short, title_long,
-                        description, crse_id, acad_career, acad_group,
-                        catalog_prereq, catalog_coreq, catalog_forbidden_overlaps,
-                        crse_attrs_json, catalog_num, units_min, units_max,
-                        has_letter_grade, crosslists_json, components_json,
-                        enroll_groups_json, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                    """,
+                meta_rows_batch.append(
                     (
                         roster_u,
                         c.subject,
@@ -325,15 +297,15 @@ class CatalogSyncService:
                         c.catalog_prereq,
                         c.catalog_coreq,
                         c.catalog_forbidden_overlaps,
-                        crse_attrs_json,
+                        orjson.dumps(c.crse_attrs).decode("utf-8"),
                         catalog_num,
                         units_min,
                         units_max,
                         1 if has_letter else 0,
-                        crosslists_json,
-                        components_json,
-                        eg_json,
-                    ),
+                        json.dumps(crosslists),
+                        json.dumps(components),
+                        orjson.dumps(c.enroll_groups).decode("utf-8"),
+                    )
                 )
 
                 class_nbrs_tokens: list[str] = []
@@ -358,16 +330,7 @@ class CatalogSyncService:
                                 0,
                             )
                         )
-                    await conn.execute(
-                        """
-                        INSERT INTO roster_sections (
-                            roster, subject, catalog_nbr, class_nbr, enroll_group_idx,
-                            ssr_component, section, open_status, components_required_json,
-                            meetings_summary, instructors_summary, campus, location, location_descr,
-                            instruction_mode, updated_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                        """,
+                    sec_rows_batch.append(
                         (
                             roster_u,
                             c.subject,
@@ -384,16 +347,10 @@ class CatalogSyncService:
                             sec.location,
                             sec.location_descr,
                             sec.instruction_mode,
-                        ),
+                        )
                     )
 
-                await conn.execute(
-                    """
-                    INSERT INTO courses_fts (
-                        roster, subject, catalog_nbr, course_code, title_long, description, class_nbrs
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                fts_rows_batch.append(
                     (
                         roster_u,
                         c.subject,
@@ -402,7 +359,46 @@ class CatalogSyncService:
                         c.title_long,
                         c.description,
                         " ".join(class_nbrs_tokens),
-                    ),
+                    )
+                )
+
+            if meta_rows_batch:
+                await conn.executemany(
+                    """
+                    INSERT INTO courses_meta (
+                        roster, subject, catalog_nbr, title_short, title_long,
+                        description, crse_id, acad_career, acad_group,
+                        catalog_prereq, catalog_coreq, catalog_forbidden_overlaps,
+                        crse_attrs_json, catalog_num, units_min, units_max,
+                        has_letter_grade, crosslists_json, components_json,
+                        enroll_groups_json, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    """,
+                    meta_rows_batch,
+                )
+            if sec_rows_batch:
+                await conn.executemany(
+                    """
+                    INSERT INTO roster_sections (
+                        roster, subject, catalog_nbr, class_nbr, enroll_group_idx,
+                        ssr_component, section, open_status, components_required_json,
+                        meetings_summary, instructors_summary, campus, location, location_descr,
+                        instruction_mode, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    """,
+                    sec_rows_batch,
+                )
+            if fts_rows_batch:
+                await conn.executemany(
+                    """
+                    INSERT INTO courses_fts (
+                        roster, subject, catalog_nbr, course_code, title_long, description, class_nbrs
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    fts_rows_batch,
                 )
 
             if status_flips:
@@ -431,6 +427,7 @@ class CatalogSyncService:
         self._catalog_generation[roster_u] = self._catalog_generation.get(roster_u, 0) + 1
         self._cs_index_cache.pop(roster_u, None)
         self._ilr_index_cache.pop(roster_u, None)
+        self._minors_rows_cache.pop(roster_u, None)
 
     async def update_section_statuses(
         self,
@@ -442,15 +439,32 @@ class CatalogSyncService:
             return
         roster_u = roster.upper()
         async with self.db.write_tx() as conn:
-            for class_nbr, new_status in changed_sections:
-                await conn.execute(
-                    """
-                    UPDATE roster_sections
-                    SET open_status = ?, updated_at = datetime('now')
-                    WHERE roster = ? AND class_nbr = ?
-                    """,
-                    (new_status, roster_u, class_nbr),
-                )
+            await conn.executemany(
+                """
+                UPDATE roster_sections
+                SET open_status = ?, updated_at = datetime('now')
+                WHERE roster = ? AND class_nbr = ?
+                """,
+                [(new_status, roster_u, class_nbr) for class_nbr, new_status in changed_sections],
+            )
+
+    def _is_synced_at_stale(
+        self,
+        synced_at: Optional[str],
+        max_age_hours: Optional[float] = None,
+        max_age_seconds: Optional[float] = None,
+    ) -> bool:
+        if not synced_at:
+            return True
+        synced_dt = _parse_utc_dt(synced_at)
+        if synced_dt is None:
+            return True
+        delta = (
+            timedelta(seconds=max_age_seconds)
+            if max_age_seconds is not None
+            else timedelta(hours=(max_age_hours if max_age_hours is not None else self.sync_interval_hours))
+        )
+        return datetime.now(timezone.utc) - synced_dt > delta
 
     async def is_subject_stale(
         self,
@@ -463,15 +477,11 @@ class CatalogSyncService:
             "SELECT synced_at FROM subjects WHERE roster = ? AND value = ?",
             (roster.upper(), subject.upper()),
         )
-        if row is None or not row["synced_at"]:
-            return True
-        synced_dt = _parse_utc_dt(row["synced_at"])
-        if synced_dt is None:
-            return True
-        delta = timedelta(seconds=max_age_seconds) if max_age_seconds is not None else timedelta(
-            hours=(max_age_hours if max_age_hours is not None else self.sync_interval_hours)
+        return self._is_synced_at_stale(
+            row["synced_at"] if row else None,
+            max_age_hours=max_age_hours,
+            max_age_seconds=max_age_seconds,
         )
-        return datetime.now(timezone.utc) - synced_dt > delta
 
     async def _subject_is_never_synced(self, roster: str, subject: str) -> bool:
         row = await self.db.fetch_one(
@@ -618,10 +628,10 @@ class CatalogSyncService:
                     "SELECT value, synced_at FROM subjects WHERE roster = ? ORDER BY value ASC",
                     (roster_u,),
                 )
-            stale_map = {}
-            for r in rows:
-                val = str(r["value"]).upper()
-                stale_map[val] = await self.is_subject_stale(roster_u, val)
+            stale_map = {
+                str(r["value"]).upper(): self._is_synced_at_stale(r.get("synced_at"))
+                for r in rows
+            }
 
             ordered = [s for s in self._ordered_warmup_subjects(rows) if stale_map.get(s)]
             for subj in ordered:
@@ -756,14 +766,24 @@ class CatalogSyncService:
 
         while self._historical_lookup_queued and not self._stop_event.is_set() and not rate_limited:
             batch = sorted(self._historical_lookup_queued)
+            existing_codes: set[str] = set()
+            batch_pairs = [code.split(" ", 1) for code in batch if " " in code]
+            for chunk in chunk_list(batch_pairs, 150):
+                clauses = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in chunk)
+                params: list[Any] = []
+                for s, n in chunk:
+                    params.extend((s, n))
+                found_rows = await self.db.fetch_all(
+                    f"SELECT DISTINCT subject, catalog_nbr FROM courses_meta WHERE {clauses}",
+                    tuple(params),
+                )
+                for fr in found_rows:
+                    existing_codes.add(f"{str(fr['subject']).upper()} {str(fr['catalog_nbr']).upper()}")
+
             by_subj: dict[str, set[str]] = {}
             for code in batch:
                 subj, nbr = code.split(" ", 1)
-                row = await self.db.fetch_one(
-                    "SELECT 1 FROM courses_meta WHERE subject = ? AND catalog_nbr = ? LIMIT 1",
-                    (subj, nbr),
-                )
-                if row is not None:
+                if code in existing_codes:
                     self._historical_lookup_queued.discard(code)
                     resolved.append(code)
                     continue
@@ -938,19 +958,18 @@ class CatalogSyncService:
             "refreshing_subjects": sorted(s for r, s in self._refresh_pending if r == roster_u),
         }
 
-    async def _get_subject_freshness(self, roster_u: str, subject_u: str) -> tuple[bool, Optional[str]]:
-        """Return (is_fresh, effective_synced_at_iso) using subjects.synced_at and live poller bucket."""
-        row = await self.db.fetch_one(
-            "SELECT synced_at FROM subjects WHERE roster = ? AND value = ?",
-            (roster_u, subject_u),
-        )
-        subj_dt = _parse_utc_dt(row["synced_at"]) if row else None
+    def _compute_subject_freshness(
+        self,
+        roster_u: str,
+        subject_u: str,
+        synced_at: Optional[str],
+    ) -> tuple[bool, Optional[str]]:
+        subj_dt = _parse_utc_dt(synced_at)
         poll_iso = self._poller.get_bucket_last_polled_at(roster_u, subject_u) if self._poller else None
         poll_dt = _parse_utc_dt(poll_iso)
 
-        best_dt: Optional[datetime] = None
         if subj_dt and poll_dt:
-            best_dt = max(subj_dt, poll_dt)
+            best_dt: Optional[datetime] = max(subj_dt, poll_dt)
         else:
             best_dt = subj_dt or poll_dt
 
@@ -958,6 +977,45 @@ class CatalogSyncService:
             return False, None
         age_sec = (datetime.now(timezone.utc) - best_dt).total_seconds()
         return age_sec <= STATUS_FRESHNESS_SEC, best_dt.isoformat()
+
+    async def get_subject_freshness(self, roster_u: str, subject_u: str) -> tuple[bool, Optional[str]]:
+        """Return (is_fresh, effective_synced_at_iso) using subjects.synced_at and live poller bucket."""
+        row = await self.db.fetch_one(
+            "SELECT synced_at FROM subjects WHERE roster = ? AND value = ?",
+            (roster_u.upper(), subject_u.upper()),
+        )
+        return self._compute_subject_freshness(
+            roster_u.upper(),
+            subject_u.upper(),
+            row["synced_at"] if row else None,
+        )
+
+    async def get_subject_freshness_map(
+        self,
+        roster_u: str,
+        subjects: Iterable[str],
+    ) -> dict[str, tuple[bool, Optional[str]]]:
+        """Batch-compute (is_fresh, effective_synced_at_iso) for a collection of subjects."""
+        roster_norm = roster_u.upper()
+        subjs = sorted({s.strip().upper() for s in subjects if s and s.strip()})
+        if not subjs:
+            return {}
+        synced_lookup: dict[str, Optional[str]] = {}
+        for chunk in chunk_list(subjs, 200):
+            qmarks = ", ".join("?" for _ in chunk)
+            rows = await self.db.fetch_all(
+                f"SELECT value, synced_at FROM subjects WHERE roster = ? AND value IN ({qmarks})",
+                (roster_norm, *chunk),
+            )
+            for r in rows:
+                synced_lookup[str(r["value"]).upper()] = r.get("synced_at")
+        return {
+            su: self._compute_subject_freshness(roster_norm, su, synced_lookup.get(su))
+            for su in subjs
+        }
+
+    # Backwards-compatible alias for any internal callers
+    _get_subject_freshness = get_subject_freshness
 
     async def get_ilr_requirements_index(self, roster: str) -> ILRRequirementsIndex:
         """Build or return cached ILRRequirementsIndex over all cached courses for a roster."""
@@ -992,30 +1050,24 @@ class CatalogSyncService:
         roster_u = roster.upper()
         ilr_index = await self.get_ilr_requirements_index(roster_u)
 
-        course_rows = await self.db.fetch_all(
-            """
-            SELECT subject, catalog_nbr
-            FROM courses_meta
-            WHERE roster = ?
-            """,
-            (roster_u,),
-        )
-
-        # Keep only courses with at least one ILR requirement code / core tag.
+        # Reuse cached ilr_index.by_code instead of scanning courses_meta twice
         ilr_courses: set[tuple[str, str]] = set()
         ilr_subjects: set[str] = set()
-        for row in course_rows:
-            su = str(row["subject"]).upper()
-            nbr = str(row["catalog_nbr"])
-            elig = ilr_index.get(su, nbr)
-            if elig is not None and elig.codes:
+        for code, elig in ilr_index.by_code.items():
+            if elig.codes and " " in code:
+                su, nbr = code.split(" ", 1)
                 ilr_courses.add((su, nbr))
                 ilr_subjects.add(su)
 
-        freshness_by_subj: dict[str, bool] = {}
-        for su in ilr_subjects:
-            is_fresh, _ = await self._get_subject_freshness(roster_u, su)
-            freshness_by_subj[su] = is_fresh
+        subj_rows = await self.db.fetch_all(
+            "SELECT value, synced_at FROM subjects WHERE roster = ?",
+            (roster_u,),
+        )
+        synced_lookup = {str(r["value"]).upper(): r.get("synced_at") for r in subj_rows}
+        freshness_by_subj: dict[str, bool] = {
+            su: self._compute_subject_freshness(roster_u, su, synced_lookup.get(su))[0]
+            for su in ilr_subjects
+        }
 
         sec_by_course: dict[tuple[str, str], list[dict[str, Any]]] = {}
         if ilr_courses:
@@ -1028,7 +1080,7 @@ class CatalogSyncService:
                 (roster_u,),
             )
             for sec in sec_rows:
-                key = (str(sec["subject"]).upper(), str(sec["catalog_nbr"]))
+                key = (str(sec["subject"]).upper(), str(sec["catalog_nbr"]).upper())
                 if key in ilr_courses:
                     sec_by_course.setdefault(key, []).append(sec)
 
@@ -1063,11 +1115,6 @@ class CatalogSyncService:
         summary = ilr_index.build_summary(course_status_map)
         coverage = await self.get_catalog_status(roster_u)
 
-        subj_rows = await self.db.fetch_all(
-            "SELECT value, synced_at FROM subjects WHERE roster = ?",
-            (roster_u,),
-        )
-        synced_lookup = {str(r["value"]).upper(): r.get("synced_at") for r in subj_rows}
         ilr_total = sum(1 for s in PRIORITY_ILR_SUBJECTS if s in synced_lookup)
         ilr_synced = sum(1 for s in PRIORITY_ILR_SUBJECTS if synced_lookup.get(s))
 
@@ -1078,7 +1125,7 @@ class CatalogSyncService:
                 if s not in synced_lookup:
                     continue
                 if sync_priority:
-                    if await self.is_subject_stale(roster_u, s):
+                    if self._is_synced_at_stale(synced_lookup.get(s)):
                         to_queue.append(s)
                 elif not synced_lookup.get(s):
                     to_queue.append(s)
@@ -1605,7 +1652,7 @@ class CatalogSyncService:
         total_matched = len(courses)
         courses = courses[:limit]
 
-        # Compute freshness once per visible subject
+        # Compute freshness once per visible subject in one batched query
         visible_subjects: list[str] = []
         seen_vis: set[str] = set()
         for c in courses:
@@ -1614,20 +1661,13 @@ class CatalogSyncService:
                 seen_vis.add(su)
                 visible_subjects.append(su)
 
-        freshness_by_subj: dict[str, tuple[bool, Optional[str]]] = {}
-        stale_visible_subjects: list[str] = []
-        for su in visible_subjects:
-            is_fresh, eff_iso = await self._get_subject_freshness(roster_u, su)
-            freshness_by_subj[su] = (is_fresh, eff_iso)
-            if not is_fresh:
-                stale_visible_subjects.append(su)
+        freshness_by_subj = await self.get_subject_freshness_map(roster_u, visible_subjects)
+        stale_visible_subjects = [
+            su for su in visible_subjects if not freshness_by_subj.get(su, (False, None))[0]
+        ]
 
-        active_ilr_set: set[str] = set()
-        for raw_code in ilr_filter_list:
-            if raw_code == "MAIN_3":
-                active_ilr_set.update(("ICL-IL", "LH-IL", "QP-IL"))
-            elif raw_code != "ANY_IL":
-                active_ilr_set.add(raw_code)
+        _, explicit_ilr = normalize_ilr_filter_codes(ilr_filter_list)
+        active_ilr_set = set(explicit_ilr)
 
         drop_odds_map = await fetch_course_drop_odds_map(
             self.db,
@@ -1638,6 +1678,7 @@ class CatalogSyncService:
         for c in courses:
             su = str(c["subject"]).upper()
             nbr = str(c["catalog_nbr"])
+            nbr_u = nbr.upper()
             is_fresh, eff_iso = freshness_by_subj.get(su, (False, None))
             hidden_locs = hidden_by_course.get((su, nbr), [])
             c["crosslists"] = _decode_json_list(c.pop("crosslists_json", "[]"))
@@ -1649,7 +1690,7 @@ class CatalogSyncService:
             c["hidden_other_location_count"] = len(hidden_locs)
             c["hidden_other_locations"] = sorted(set(hidden_locs))
             c["external_links"] = build_external_links(c["roster"], su, nbr)
-            prereq_eval = prereq_by_course.get((su, str(nbr).upper())) or cs_index.evaluate_course_prereqs(
+            prereq_eval = prereq_by_course.get((su, nbr_u)) or cs_index.evaluate_course_prereqs(
                 su,
                 nbr,
                 satisfied_set,
@@ -1666,7 +1707,7 @@ class CatalogSyncService:
                     else None
                 )
             if minor_id:
-                c["minor_eligibility"] = minor_by_course.get((su, nbr))
+                c["minor_eligibility"] = minor_by_course.get((su, nbr_u))
             c["subject_synced_at"] = eff_iso
             c["status_is_stale"] = not is_fresh
             c["drop_odds"] = drop_odds_map.get((su, nbr))
@@ -1721,15 +1762,21 @@ class CatalogSyncService:
     ) -> dict[str, Any]:
         """Return Cornell minor definitions, live roster course counts, and user auto-fill matches."""
         roster_u = roster.upper()
-        roster_rows = await self.db.fetch_all(
-            """
-            SELECT subject, catalog_nbr, catalog_num, title_short, title_long,
-                   has_letter_grade, units_min, units_max, components_json, crosslists_json
-            FROM courses_meta
-            WHERE roster = ?
-            """,
-            (roster_u,),
-        )
+        gen = self._catalog_generation.get(roster_u, 0)
+        cached_rows = self._minors_rows_cache.get(roster_u)
+        if cached_rows is not None and cached_rows[0] == gen:
+            roster_rows = cached_rows[1]
+        else:
+            roster_rows = await self.db.fetch_all(
+                """
+                SELECT subject, catalog_nbr, catalog_num, title_short, title_long,
+                       has_letter_grade, units_min, units_max, components_json, crosslists_json
+                FROM courses_meta
+                WHERE roster = ?
+                """,
+                (roster_u,),
+            )
+            self._minors_rows_cache[roster_u] = (gen, roster_rows)
         meta_by_code: dict[str, dict[str, Any]] = {}
         for row in roster_rows:
             code = normalize_minor_course_code(f"{row.get('subject', '')} {row.get('catalog_nbr', '')}")
@@ -1743,10 +1790,10 @@ class CatalogSyncService:
                 subj, nbr = code.split(" ", 1)
                 missing_codes.append((subj, nbr))
 
-        if missing_codes:
-            pairs_sql = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in missing_codes)
+        for chunk in chunk_list(missing_codes, 150):
+            pairs_sql = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in chunk)
             params: list[Any] = []
-            for subj, nbr in missing_codes:
+            for subj, nbr in chunk:
                 params.extend((subj, nbr))
             hist_rows = await self.db.fetch_all(
                 f"""
@@ -1909,19 +1956,3 @@ class CatalogSyncService:
             _append_rows(like_rows)
 
         return rows[:limit]
-
-    async def search_courses(
-        self,
-        roster: str,
-        query: str = "",
-        subject: str = "",
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Backwards-compatible search returning only the matching courses list."""
-        res = await self.search_courses_advanced(
-            roster=roster,
-            query=query,
-            subjects=[subject] if subject.strip() else None,
-            limit=limit,
-        )
-        return res["courses"]

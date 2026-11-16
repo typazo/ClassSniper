@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.deps import get_dispatcher
 from app.api.schemas import (
     NotificationPreferencesRequest,
     PushSubscribeRequest,
@@ -18,10 +19,6 @@ from app.db import Database
 from app.services.dispatcher import AlertDispatcher
 
 router = APIRouter(prefix="/api", tags=["notifications"])
-
-
-def get_dispatcher(request: Request) -> AlertDispatcher:
-    return request.app.state.dispatcher
 
 
 @router.get("/push/vapid-key")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -66,6 +67,15 @@ class PushSubscribeRequest(BaseModel):
     keys: PushSubscriptionKeys
     device_label: str = Field(default="Browser", min_length=1, max_length=80)
 
+    @field_validator("endpoint")
+    @classmethod
+    def check_https_endpoint(cls, v: str) -> str:
+        cleaned = v.strip()
+        parsed = urlparse(cleaned)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("Push subscription endpoint must be a valid https:// URL")
+        return cleaned
+
 
 class PushUnsubscribeRequest(BaseModel):
     endpoint: Optional[str] = None
@@ -115,7 +125,7 @@ class CreateInviteRequest(BaseModel):
 
 class UpdateAdminSettingsRequest(BaseModel):
     discord_shared_webhook_url: Optional[str] = None
-    poll_max_rps: Optional[float] = Field(default=None, ge=0.2, le=3.0)
+    poll_max_rps: Optional[float] = Field(default=None, ge=0.1, le=5.0)
 
     @field_validator("discord_shared_webhook_url")
     @classmethod
@@ -133,11 +143,6 @@ class UpdateAdminSettingsRequest(BaseModel):
 class SyncCatalogRequest(BaseModel):
     roster: Optional[str] = None
     subject: Optional[str] = None
-
-
-class RefreshSubjectsRequest(BaseModel):
-    roster: str = Field(min_length=3, max_length=10)
-    subjects: list[str] = Field(min_length=1, max_length=20)
 
 
 class CompletedPrereqsRequest(BaseModel):

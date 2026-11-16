@@ -8,11 +8,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.auth import (
+    USER_SELECT_COLUMNS,
     clear_session_cookie,
     get_current_user,
     get_db,
     hash_password_async,
     normalize_major_mode,
+    serialize_user_row,
     set_session_cookie,
     verify_password_async,
     verify_session_token,
@@ -25,58 +27,14 @@ from app.api.schemas import (
     RegisterInviteRequest,
     UserPreferencesRequest,
 )
-from app.services.cs_requirements import decode_completed_course_details, decode_completed_courses
-from app.services.minors import decode_minor_prefs, encode_minor_prefs, normalize_minor_prefs
+from app.services.common import parse_utc_dt
+from app.services.minors import encode_minor_prefs, normalize_minor_prefs
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
-    completed = (
-        list(user["completed_courses"])
-        if isinstance(user.get("completed_courses"), list)
-        else decode_completed_courses(user.get("completed_courses_json"))
-    )
-    completed_details = (
-        dict(user["completed_course_details"])
-        if isinstance(user.get("completed_course_details"), dict)
-        else decode_completed_course_details(user.get("completed_course_details_json"))
-    )
-    in_progress = (
-        list(user["in_progress_courses"])
-        if isinstance(user.get("in_progress_courses"), list)
-        else decode_completed_courses(user.get("in_progress_courses_json"))
-    )
-    in_progress_details = (
-        dict(user["in_progress_course_details"])
-        if isinstance(user.get("in_progress_course_details"), dict)
-        else decode_completed_course_details(user.get("in_progress_course_details_json"))
-    )
-    raw_implied = user.get("include_implied_prereqs")
-    mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
-    minor_prefs = (
-        dict(user["minor_prefs"])
-        if isinstance(user.get("minor_prefs"), dict)
-        else decode_minor_prefs(user.get("minor_prefs_json"))
-    )
-    return {
-        "id": user["id"],
-        "username": user["username"],
-        "role": user["role"],
-        "priority_tier": user["priority_tier"],
-        "discord_user_id": user.get("discord_user_id") or "",
-        "discord_ping_enabled": bool(user.get("discord_ping_enabled", 1)),
-        "web_push_enabled": bool(user.get("web_push_enabled", 1)),
-        "has_personal_webhook": bool((user.get("personal_webhook_url") or "").strip()),
-        "completed_courses": completed,
-        "completed_course_details": completed_details,
-        "in_progress_courses": in_progress,
-        "in_progress_course_details": in_progress_details,
-        "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
-        "major_mode": mode,
-        "show_cs_features": show_cs,
-        "minor_prefs": minor_prefs,
-    }
+    return serialize_user_row(user)
 
 
 @router.get("/status")
@@ -94,13 +52,8 @@ async def auth_status(
         uid = verify_session_token(token, settings)
         if uid is not None:
             row = await db.fetch_one(
-                """
-                SELECT id, username, role, priority_tier, discord_user_id,
-                       discord_ping_enabled, personal_webhook_url, web_push_enabled,
-                       completed_courses_json, completed_course_details_json,
-                       in_progress_courses_json, in_progress_course_details_json,
-                       include_implied_prereqs, show_cs_features,
-                       major_mode, minor_prefs_json
+                f"""
+                SELECT {USER_SELECT_COLUMNS}
                 FROM users
                 WHERE id = ?
                 """,
@@ -163,13 +116,8 @@ async def login(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     user = await db.fetch_one(
-        """
-        SELECT id, username, password_hash, role, priority_tier, discord_user_id,
-               discord_ping_enabled, personal_webhook_url, web_push_enabled,
-               completed_courses_json, completed_course_details_json,
-               in_progress_courses_json, in_progress_course_details_json,
-               include_implied_prereqs, show_cs_features,
-               major_mode, minor_prefs_json
+        f"""
+        SELECT password_hash, {USER_SELECT_COLUMNS}
         FROM users
         WHERE username = ?
         """,
@@ -203,10 +151,8 @@ async def register_with_invite(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite code has already been used")
 
         if invite["expires_at"]:
-            exp_dt = datetime.fromisoformat(invite["expires_at"])
-            if exp_dt.tzinfo is None:
-                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) > exp_dt:
+            exp_dt = parse_utc_dt(invite["expires_at"])
+            if exp_dt is not None and datetime.now(timezone.utc) > exp_dt:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite code has expired")
 
         existing = await conn.execute("SELECT id FROM users WHERE username = ?", (username,))

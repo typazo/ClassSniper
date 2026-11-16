@@ -7,6 +7,8 @@ import { summarizeScheduleInsights } from "../utils/scheduleInsights";
 import {
   computeScheduleDiagnostics,
   getCourseColor,
+  getCourseEffectiveUnits,
+  getSelectedSections,
 } from "../utils/schedulerSolver";
 import { StatusBadge } from "./StatusBadge";
 import { WeeklyCalendarGrid } from "./WeeklyCalendarGrid";
@@ -158,14 +160,8 @@ export function SharedScheduleView({ token, onExit }: Props) {
                   .filter((c) => c.enabled)
                   .map((course) => {
                     const style = getCourseColor(course.color_idx);
-                    const selSet = new Set(course.selected_class_nbrs);
-                    const secs = course.enroll_groups.flatMap((eg) =>
-                      eg.sections.filter((s) => selSet.has(s.class_nbr))
-                    );
-                    const cr =
-                      course.selected_units != null
-                        ? course.selected_units
-                        : course.units_max || course.units_min;
+                    const secs = getSelectedSections(course);
+                    const cr = getCourseEffectiveUnits(course);
                     return (
                       <div
                         key={course.id}

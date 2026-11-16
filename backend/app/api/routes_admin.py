@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
+from app.api.deps import get_catalog, get_dispatcher, get_poller, get_sse
 from app.api.schemas import CreateInviteRequest, UpdateAdminSettingsRequest
 from app.auth import get_admin_user, get_current_user, get_db
 from app.config import Settings, get_settings
@@ -22,22 +23,6 @@ from app.services.poller import PollerEngine
 from app.services.sse import SSEHub
 
 router = APIRouter(prefix="/api", tags=["admin-telemetry"])
-
-
-def get_poller(request: Request) -> PollerEngine:
-    return request.app.state.poller
-
-
-def get_catalog(request: Request) -> CatalogSyncService:
-    return request.app.state.catalog
-
-
-def get_sse(request: Request) -> SSEHub:
-    return request.app.state.sse_hub
-
-
-def get_dispatcher(request: Request) -> AlertDispatcher:
-    return request.app.state.dispatcher
 
 
 @router.get("/health")
@@ -199,7 +184,12 @@ async def get_admin_settings(
 ) -> dict[str, Any]:
     shared_url = await dispatcher.get_shared_discord_webhook_url()
     poll_rps_raw = await db.get_setting("poll_max_rps", "")
-    poll_rps = float(poll_rps_raw) if poll_rps_raw else settings.poll_max_rps
+    poll_rps = settings.poll_max_rps
+    if poll_rps_raw:
+        try:
+            poll_rps = float(poll_rps_raw)
+        except ValueError:
+            poll_rps = settings.poll_max_rps
     return {
         "app_domain": settings.app_domain,
         "app_origin": settings.app_origin,

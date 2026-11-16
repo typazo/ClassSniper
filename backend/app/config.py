@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import secrets
@@ -14,9 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-def _b64url_nopad(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+from app.services.common import b64url_nopad
 
 
 def generate_vapid_keypair() -> tuple[str, str]:
@@ -27,7 +24,7 @@ def generate_vapid_keypair() -> tuple[str, str]:
         encoding=serialization.Encoding.X962,
         format=serialization.PublicFormat.UncompressedPoint,
     )
-    return _b64url_nopad(pub_bytes), _b64url_nopad(priv_bytes)
+    return b64url_nopad(pub_bytes), b64url_nopad(priv_bytes)
 
 
 class Settings(BaseSettings):

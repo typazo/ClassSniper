@@ -256,14 +256,6 @@ export function CourseInsightsPanel({ course, insights, loading, error, onRefres
                 ))}
               </div>
             )}
-
-            <p className="text-[10px] text-zinc-500">
-              Coursicle blocks automated server scraping with CAPTCHA, so{" "}
-              <a href={links.coursicle} target="_blank" rel="noreferrer" className="text-indigo-400 hover:underline">
-                Coursicle ({course.subject} {course.catalog_nbr})
-              </a>{" "}
-              opens directly in a new tab.
-            </p>
           </div>
         </div>
       )}

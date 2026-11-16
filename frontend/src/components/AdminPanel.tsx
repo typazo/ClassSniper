@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Check, Copy, Database, Link2, Save, Trash2, Users } from "lucide-react";
 import { api } from "../api/client";
+import { useCopyFeedback } from "../hooks/useCopyFeedback";
 import type { AdminSettings, AdminUserItem, InviteItem } from "../types";
-import { copyText } from "../utils/pwa";
 
 export function AdminPanel() {
   const [invites, setInvites] = useState<InviteItem[]>([]);
@@ -13,7 +13,8 @@ export function AdminPanel() {
   const [inviteNote, setInviteNote] = useState("");
   const [inviteUses, setInviteUses] = useState(1);
   const [latestInviteUrl, setLatestInviteUrl] = useState("");
-  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const { copiedKey, copy } = useCopyFeedback<string>();
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
@@ -71,12 +72,36 @@ export function AdminPanel() {
     }
   }
 
-  async function handleCopyInvite(code: string) {
+  function handleCopyInvite(code: string) {
     const origin = settings?.app_origin || window.location.origin;
-    const ok = await copyText(`${origin}/?invite=${code}`);
-    if (ok) {
-      setCopiedCode(code);
-      setTimeout(() => setCopiedCode(null), 1800);
+    void copy(`${origin}/?invite=${code}`, code);
+  }
+
+  async function handleDeleteInvite(code: string) {
+    if (!window.confirm(`Revoke invite ${code}?`)) return;
+    setError("");
+    setBusyAction(`inv:${code}`);
+    try {
+      await api.deleteInvite(code);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete invite");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDeleteUser(u: AdminUserItem) {
+    if (!window.confirm(`Remove user "${u.username}" and all their watches/schedules?`)) return;
+    setError("");
+    setBusyAction(`user:${u.id}`);
+    try {
+      await api.deleteUser(u.id);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove user");
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -197,10 +222,11 @@ export function AdminPanel() {
             <span className="truncate font-mono">{latestInviteUrl}</span>
             <button
               type="button"
-              onClick={() => copyText(latestInviteUrl)}
-              className="shrink-0 rounded-lg bg-emerald-500/20 px-2.5 py-1 font-semibold hover:bg-emerald-500/30"
+              onClick={() => void copy(latestInviteUrl, "latest")}
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-500/20 px-2.5 py-1 font-semibold hover:bg-emerald-500/30"
             >
-              Copy Link
+              {copiedKey === "latest" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+              {copiedKey === "latest" ? "Copied" : "Copy Link"}
             </button>
           </div>
         )}
@@ -224,16 +250,15 @@ export function AdminPanel() {
                   onClick={() => handleCopyInvite(inv.code)}
                   className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
                 >
-                  {copiedCode === inv.code ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                  Copy URL
+                  {copiedKey === inv.code ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                  {copiedKey === inv.code ? "Copied" : "Copy URL"}
                 </button>
                 <button
                   type="button"
-                  onClick={async () => {
-                    await api.deleteInvite(inv.code);
-                    await loadAll();
-                  }}
-                  className="text-rose-400 hover:text-rose-300"
+                  disabled={busyAction === `inv:${inv.code}`}
+                  onClick={() => void handleDeleteInvite(inv.code)}
+                  className="text-rose-400 hover:text-rose-300 disabled:opacity-40"
+                  aria-label={`Delete invite ${inv.code}`}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -268,11 +293,9 @@ export function AdminPanel() {
               {u.role !== "admin" && (
                 <button
                   type="button"
-                  onClick={async () => {
-                    await api.deleteUser(u.id);
-                    await loadAll();
-                  }}
-                  className="text-rose-400 hover:text-rose-300"
+                  disabled={busyAction === `user:${u.id}`}
+                  onClick={() => void handleDeleteUser(u)}
+                  className="text-rose-400 hover:text-rose-300 disabled:opacity-40"
                 >
                   Remove
                 </button>

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.config import Settings
 from app.db import Database
+
+logger = logging.getLogger("classsniper.dispatcher")
 from app.providers.base import CourseRecord, SectionRecord
 from app.services.notifiers import (
     DeliveryOutcome,
@@ -51,9 +54,11 @@ class AlertDispatcher:
         self.discord = discord
 
     async def get_shared_discord_webhook_url(self) -> str:
-        override = await self.db.get_setting("discord_shared_webhook_url", "")
-        if override.strip():
-            return override.strip()
+        row = await self.db.fetch_one(
+            "SELECT value FROM app_settings WHERE key = 'discord_shared_webhook_url'"
+        )
+        if row is not None:
+            return str(row["value"] or "").strip()
         return self.settings.discord_shared_webhook_url.strip()
 
     async def dispatch_alerts(self, alerts: list[MatchedAlert]) -> None:
@@ -67,10 +72,13 @@ class AlertDispatcher:
             grouped.setdefault(key, []).append(alert)
 
         shared_webhook_url = await self.get_shared_discord_webhook_url()
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self._dispatch_group(group, shared_webhook_url) for group in grouped.values()),
             return_exceptions=True,
         )
+        for res in results:
+            if isinstance(res, Exception):
+                logger.warning("Alert group dispatch failed: %s", res)
 
     async def _dispatch_group(
         self,
@@ -304,30 +312,46 @@ class AlertDispatcher:
         if target in {"all", "discord"}:
             shared_url = await self.get_shared_discord_webhook_url()
             d_uid = user.get("discord_user_id")
-            if shared_url and is_valid_discord_user_id(d_uid):
+
+            async def _send_test_webhook(
+                webhook_url: str,
+                channel_kind: str,
+                title: str,
+                mentions: list[str],
+                success_detail: str,
+            ) -> dict[str, Any]:
                 payload = self.discord.build_seat_payload(
                     roster="SP27",
                     subject="TEST",
                     catalog_nbr="1010",
-                    course_title="ClassSniper Ping Verification",
+                    course_title=title,
                     section_label="LEC 001",
                     class_nbr=12345,
                     old_status="C",
                     new_status="O",
                     meetings_summary="MWF 10:10AM-11:00AM",
                     instructors_summary="Test Bot",
-                    mention_user_ids=[str(d_uid)],
+                    mention_user_ids=mentions,
                     poll_rtt_ms=1,
                     app_origin=self.settings.app_origin,
                 )
-                out = await self.discord.send_payload(shared_url, payload, channel_kind="discord_shared")
+                out = await self.discord.send_payload(webhook_url, payload, channel_kind=channel_kind)
+                return {
+                    "channel": channel_kind,
+                    "status": out.status,
+                    "latency_ms": out.latency_ms,
+                    "detail": out.error_text or success_detail,
+                }
+
+            if shared_url and is_valid_discord_user_id(d_uid):
                 results.append(
-                    {
-                        "channel": "discord_shared",
-                        "status": out.status,
-                        "latency_ms": out.latency_ms,
-                        "detail": out.error_text or "Pinged your Discord User ID in shared channel",
-                    }
+                    await _send_test_webhook(
+                        shared_url,
+                        "discord_shared",
+                        "ClassSniper Ping Verification",
+                        [str(d_uid)],
+                        "Pinged your Discord User ID in shared channel",
+                    )
                 )
             elif target == "discord":
                 reason = "Shared Discord webhook URL not set by admin" if not shared_url else "Enter a valid 17-19 digit Discord User ID first"
@@ -336,29 +360,14 @@ class AlertDispatcher:
             personal_url = (user.get("personal_webhook_url") or "").strip()
             if self.settings.allow_custom_personal_webhooks and is_valid_discord_webhook_url(personal_url):
                 mention_list = [str(d_uid)] if is_valid_discord_user_id(d_uid) else []
-                payload = self.discord.build_seat_payload(
-                    roster="SP27",
-                    subject="TEST",
-                    catalog_nbr="1010",
-                    course_title="ClassSniper Personal Webhook Test",
-                    section_label="LEC 001",
-                    class_nbr=12345,
-                    old_status="C",
-                    new_status="O",
-                    meetings_summary="MWF 10:10AM-11:00AM",
-                    instructors_summary="Test Bot",
-                    mention_user_ids=mention_list,
-                    poll_rtt_ms=1,
-                    app_origin=self.settings.app_origin,
-                )
-                out = await self.discord.send_payload(personal_url, payload, channel_kind="discord_personal")
                 results.append(
-                    {
-                        "channel": "discord_personal",
-                        "status": out.status,
-                        "latency_ms": out.latency_ms,
-                        "detail": out.error_text or "Sent to personal webhook",
-                    }
+                    await _send_test_webhook(
+                        personal_url,
+                        "discord_personal",
+                        "ClassSniper Personal Webhook Test",
+                        mention_list,
+                        "Sent to personal webhook",
+                    )
                 )
 
         return results

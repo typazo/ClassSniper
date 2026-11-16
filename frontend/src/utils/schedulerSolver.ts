@@ -6,7 +6,6 @@ import type {
   ScheduleBlock,
   ScheduleCourseItem,
   ScheduleSection,
-  SectionMeeting,
 } from "../types";
 import { analyzeDayTransitions, type WalkTransitionWarning } from "./cornellBuildings";
 
@@ -107,6 +106,18 @@ export function getCourseColor(colorIdx: number): CourseColorStyle {
   return COURSE_COLORS[idx];
 }
 
+export const WEEKDAY_ORDER: DayCode[] = ["M", "T", "W", "R", "F"];
+export const ALL_DAYS_ORDER: DayCode[] = ["M", "T", "W", "R", "F", "Sa", "Su"];
+
+export function getCourseEffectiveUnits(course: ScheduleCourseItem): number {
+  if (course.selected_units != null && course.selected_units > 0) {
+    return course.selected_units;
+  }
+  if (course.units_max > 0) return course.units_max;
+  if (course.units_min > 0) return course.units_min;
+  return 0;
+}
+
 export function formatMinutesShort(totalMin: number): string {
   const h24 = Math.floor(totalMin / 60);
   const m = totalMin % 60;
@@ -184,7 +195,7 @@ export interface ScheduleDiagnostics {
   waitlistSelectedCount: number;
 }
 
-function getSelectedSections(course: ScheduleCourseItem): ScheduleSection[] {
+export function getSelectedSections(course: ScheduleCourseItem): ScheduleSection[] {
   const selected = new Set(course.selected_class_nbrs);
   const out: ScheduleSection[] = [];
   for (const eg of course.enroll_groups) {
@@ -217,11 +228,7 @@ export function computeScheduleDiagnostics(
   let waitlistSelectedCount = 0;
 
   for (const course of activeCourses) {
-    const cr =
-      course.selected_units != null
-        ? course.selected_units
-        : course.units_max || course.units_min || 0;
-    totalCredits += cr;
+    totalCredits += getCourseEffectiveUnits(course);
 
     const secs = getSelectedSections(course);
     for (const sec of secs) {
@@ -282,8 +289,7 @@ export function computeScheduleDiagnostics(
 
   // Walking time analysis per day across course meetings only
   const walkWarnings: WalkTransitionWarning[] = [];
-  const days: DayCode[] = ["M", "T", "W", "R", "F", "Sa", "Su"];
-  for (const day of days) {
+  for (const day of ALL_DAYS_ORDER) {
     const dayCourseSlots = allSlots
       .filter((s) => s.kind === "course" && s.day === day)
       .map((s) => ({
@@ -662,14 +668,13 @@ export function solveSchedules(
   const placedSlots: TimeSlot[] = [];
 
   const scoreAndBuild = (tuples: SectionTupleOption[]): GeneratedScheduleCandidate | null => {
-    const days: DayCode[] = ["M", "T", "W", "R", "F", "Sa", "Su"];
     let totalGapMin = 0;
     let maxContinuousMin = 0;
     let tightWalkCount = 0;
     const dayStarts: number[] = [];
     let latestEndMin = 0;
 
-    for (const day of days) {
+    for (const day of ALL_DAYS_ORDER) {
       const daySlots = placedSlots
         .filter((s) => s.day === day)
         .sort((a, b) => a.start_min - b.start_min);
@@ -832,10 +837,6 @@ export function solveSchedules(
     elapsedMs: Math.round(performance.now() - started),
     blockingIssue,
   };
-}
-
-export function getSectionMeetingCount(meetings: SectionMeeting[]): number {
-  return meetings.reduce((acc, m) => acc + m.days.length, 0);
 }
 
 export interface SimpleSlot {
@@ -1043,4 +1044,28 @@ export function selectSectionInCourse(
   }
 
   return Array.from(byComp.values());
+}
+
+/** Swap a section in a course while preserving any lock on the replaced component. */
+export function swapSectionPreservingLocks(
+  course: ScheduleCourseItem,
+  targetSection: ScheduleSection
+): { selected_class_nbrs: number[]; locked_class_nbrs: number[] } {
+  const nextSelected = selectSectionInCourse(course, targetSection);
+  const nextSelectedSet = new Set(nextSelected);
+  const prevCompLocked = getSelectedSections(course).some(
+    (s) =>
+      s.ssr_component === targetSection.ssr_component &&
+      course.locked_class_nbrs.includes(s.class_nbr)
+  );
+  const locked = new Set(
+    course.locked_class_nbrs.filter((nbr) => nextSelectedSet.has(nbr))
+  );
+  if (prevCompLocked) {
+    locked.add(targetSection.class_nbr);
+  }
+  return {
+    selected_class_nbrs: nextSelected,
+    locked_class_nbrs: Array.from(locked),
+  };
 }

@@ -1,4 +1,5 @@
-import type { DayCode, ScheduleCourseItem, ScheduleSection } from "../types";
+import type { DayCode, ScheduleCourseItem } from "../types";
+import { getSelectedSections } from "./schedulerSolver";
 
 const DAY_TO_ICS: Record<DayCode, string> = {
   M: "MO",
@@ -89,17 +90,7 @@ export function buildScheduleICS(
 
   for (const course of courses) {
     if (!course.enabled) continue;
-    const selectedSet = new Set(course.selected_class_nbrs);
-    const sections: ScheduleSection[] = [];
-    for (const eg of course.enroll_groups) {
-      for (const sec of eg.sections) {
-        if (selectedSet.has(sec.class_nbr)) {
-          sections.push(sec);
-        }
-      }
-    }
-
-    for (const sec of sections) {
+    for (const sec of getSelectedSections(course)) {
       sec.meetings.forEach((mtg, mIdx) => {
         if (!mtg.days.length || mtg.end_min <= mtg.start_min) return;
         const parsedStart = parseCornellDate(mtg.start_dt) || nextMonday();

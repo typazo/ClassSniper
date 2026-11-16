@@ -301,10 +301,7 @@ interface RawParsedRow {
 }
 
 /** Deterministically parse Cornell Student Center unofficial transcript text into sanitized course records. */
-export function parseCornellTranscriptText(
-  rawText: string,
-  _availableRosters: string[] = []
-): ParsedTranscriptResult {
+export function parseCornellTranscriptText(rawText: string): ParsedTranscriptResult {
   const rawLines = rawText
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+/g, " ").trim())

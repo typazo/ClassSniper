@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, CheckCircle2, FileUp, Loader2, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import { api } from "../api/client";
-import type { MajorMode, PrereqCourseOption, UserPrereqsResponse } from "../types";
+import { usePrereqOptions } from "../hooks/usePrereqOptions";
+import type { MajorMode, UserPrereqsResponse } from "../types";
+import { normalizeCourseCodeInput } from "../utils/courseFormat";
 
 interface Props {
   isOpen: boolean;
@@ -146,14 +148,6 @@ const IMPLIED_PREVIEW_EDGES: Record<string, string[]> = {
   "PHYS 2214": ["PHYS 2213"],
 };
 
-const COURSE_INPUT_RE = /^\s*([A-Za-z]{2,8})[\s\-:]*(\d{3,4}[A-Za-z]?)\s*$/;
-
-function normalizeCode(raw: string): string | null {
-  const m = COURSE_INPUT_RE.exec(raw);
-  if (!m) return null;
-  return `${m[1].toUpperCase()} ${m[2].toUpperCase()}`;
-}
-
 function sortCourseCodes(codes: Iterable<string>): string[] {
   return Array.from(new Set(codes)).sort((a, b) => a.localeCompare(b));
 }
@@ -200,25 +194,35 @@ export function CompletedPrereqsModal({
   const [includeImplied, setIncludeImplied] = useState(true);
   const [serverImplied, setServerImplied] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
 
   const [searchText, setSearchText] = useState("");
-  const [options, setOptions] = useState<PrereqCourseOption[]>([]);
-  const [loadingOptions, setLoadingOptions] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  const { options, loadingOptions } = usePrereqOptions(
+    roster,
+    searchText,
+    effectiveMode,
+    { enabled: isOpen && Boolean(roster), allowEmptyQuery: true, limit: 25, debounceMs: 160 }
+  );
+
   useEffect(() => {
     if (!isOpen) return;
+    let cancelled = false;
     setSelectedCourses(sortCourseCodes(initialCompleted));
     setIncludeImplied(initialIncludeImplied);
     setServerImplied([]);
     setDirty(false);
+    dirtyRef.current = false;
     setSearchText("");
     setError("");
 
     api
       .getUserPrereqs(roster || undefined)
       .then((res) => {
+        if (cancelled || dirtyRef.current) return;
         setSelectedCourses(sortCourseCodes(res.completed_courses));
         setIncludeImplied(res.include_implied_prereqs);
         setServerImplied(res.implied_courses);
@@ -227,20 +231,10 @@ export function CompletedPrereqsModal({
       .catch(() => {
         // Keep initial props fallback
       });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, roster, initialCompleted, initialIncludeImplied]);
-
-  useEffect(() => {
-    if (!isOpen || !roster) return;
-    const handle = window.setTimeout(() => {
-      setLoadingOptions(true);
-      api
-        .getPrereqOptions(roster, searchText.trim(), 25, effectiveMode)
-        .then((res) => setOptions(res.options))
-        .catch(() => setOptions([]))
-        .finally(() => setLoadingOptions(false));
-    }, 160);
-    return () => window.clearTimeout(handle);
-  }, [isOpen, roster, searchText, effectiveMode]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -252,7 +246,7 @@ export function CompletedPrereqsModal({
   }, [isOpen, saving, onClose]);
 
   const selectedSet = useMemo(() => new Set(selectedCourses), [selectedCourses]);
-  const customParsedCode = useMemo(() => normalizeCode(searchText), [searchText]);
+  const customParsedCode = useMemo(() => normalizeCourseCodeInput(searchText), [searchText]);
 
   const impliedPreview = useMemo(() => {
     if (!dirty && serverImplied.length > 0) return serverImplied;

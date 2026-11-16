@@ -11,15 +11,25 @@ import time
 from typing import Any, Optional
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import Argon2Error
 from fastapi import Depends, HTTPException, Request, Response, status
 
 from app.config import Settings, get_settings
 from app.db import Database
+from app.services.common import b64url_nopad
 from app.services.cs_requirements import decode_completed_course_details, decode_completed_courses
 from app.services.minors import decode_minor_prefs
 
 _ph = PasswordHasher()
+
+USER_SELECT_COLUMNS = """
+    id, username, role, priority_tier, discord_user_id,
+    discord_ping_enabled, personal_webhook_url, web_push_enabled,
+    completed_courses_json, completed_course_details_json,
+    in_progress_courses_json, in_progress_course_details_json,
+    include_implied_prereqs, show_cs_features,
+    major_mode, minor_prefs_json, created_at
+""".strip()
 
 
 def hash_password(password: str) -> str:
@@ -29,7 +39,7 @@ def hash_password(password: str) -> str:
 def verify_password(password_hash: str, password: str) -> bool:
     try:
         return _ph.verify(password_hash, password)
-    except VerifyMismatchError:
+    except (Argon2Error, ValueError, TypeError):
         return False
 
 
@@ -41,10 +51,6 @@ async def verify_password_async(password_hash: str, password: str) -> bool:
     return await asyncio.to_thread(verify_password, password_hash, password)
 
 
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
 def _b64url_decode(raw: str) -> bytes:
     padding = "=" * (-len(raw) % 4)
     return base64.urlsafe_b64decode(raw + padding)
@@ -52,13 +58,13 @@ def _b64url_decode(raw: str) -> bytes:
 
 def sign_session_token(user_id: int, settings: Settings) -> str:
     payload = {"uid": user_id, "exp": int(time.time()) + settings.session_ttl_seconds}
-    encoded = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    encoded = b64url_nopad(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(
         settings.session_secret.encode("utf-8"),
         encoded.encode("ascii"),
         hashlib.sha256,
     ).digest()
-    return f"{encoded}.{_b64url_encode(sig)}"
+    return f"{encoded}.{b64url_nopad(sig)}"
 
 
 def verify_session_token(token: str, settings: Settings) -> Optional[int]:
@@ -122,6 +128,71 @@ def normalize_major_mode(
     return mode, (mode == "cs")
 
 
+def decode_user_record(user: dict[str, Any]) -> dict[str, Any]:
+    """Hydrate decoded course/preference fields on a DB user row cleanly."""
+    completed = (
+        list(user["completed_courses"])
+        if isinstance(user.get("completed_courses"), list)
+        else decode_completed_courses(user.get("completed_courses_json"))
+    )
+    completed_details = (
+        dict(user["completed_course_details"])
+        if isinstance(user.get("completed_course_details"), dict)
+        else decode_completed_course_details(user.get("completed_course_details_json"))
+    )
+    in_progress = (
+        list(user["in_progress_courses"])
+        if isinstance(user.get("in_progress_courses"), list)
+        else decode_completed_courses(user.get("in_progress_courses_json"))
+    )
+    in_progress_details = (
+        dict(user["in_progress_course_details"])
+        if isinstance(user.get("in_progress_course_details"), dict)
+        else decode_completed_course_details(user.get("in_progress_course_details_json"))
+    )
+    raw_implied = user.get("include_implied_prereqs")
+    mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
+    minor_prefs = (
+        dict(user["minor_prefs"])
+        if isinstance(user.get("minor_prefs"), dict)
+        else decode_minor_prefs(user.get("minor_prefs_json"))
+    )
+    return {
+        **user,
+        "completed_courses": completed,
+        "completed_course_details": completed_details,
+        "in_progress_courses": in_progress,
+        "in_progress_course_details": in_progress_details,
+        "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
+        "major_mode": mode,
+        "show_cs_features": show_cs,
+        "minor_prefs": minor_prefs,
+    }
+
+
+def serialize_user_row(user: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a DB or hydrated user dict into the public API response shape."""
+    hydrated = decode_user_record(user)
+    return {
+        "id": hydrated["id"],
+        "username": hydrated["username"],
+        "role": hydrated["role"],
+        "priority_tier": hydrated["priority_tier"],
+        "discord_user_id": hydrated.get("discord_user_id") or "",
+        "discord_ping_enabled": bool(hydrated.get("discord_ping_enabled", 1)),
+        "web_push_enabled": bool(hydrated.get("web_push_enabled", 1)),
+        "has_personal_webhook": bool((hydrated.get("personal_webhook_url") or "").strip()),
+        "completed_courses": hydrated["completed_courses"],
+        "completed_course_details": hydrated["completed_course_details"],
+        "in_progress_courses": hydrated["in_progress_courses"],
+        "in_progress_course_details": hydrated["in_progress_course_details"],
+        "include_implied_prereqs": hydrated["include_implied_prereqs"],
+        "major_mode": hydrated["major_mode"],
+        "show_cs_features": hydrated["show_cs_features"],
+        "minor_prefs": hydrated["minor_prefs"],
+    }
+
+
 async def get_current_user(
     request: Request,
     db: Database = Depends(get_db),
@@ -134,13 +205,8 @@ async def get_current_user(
     if user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
     user = await db.fetch_one(
-        """
-        SELECT id, username, role, priority_tier, discord_user_id,
-               discord_ping_enabled, personal_webhook_url, web_push_enabled,
-               completed_courses_json, completed_course_details_json,
-               in_progress_courses_json, in_progress_course_details_json,
-               include_implied_prereqs, show_cs_features,
-               major_mode, minor_prefs_json, created_at
+        f"""
+        SELECT {USER_SELECT_COLUMNS}
         FROM users
         WHERE id = ?
         """,
@@ -148,19 +214,7 @@ async def get_current_user(
     )
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists")
-    raw_implied = user.get("include_implied_prereqs")
-    mode, show_cs = normalize_major_mode(user.get("major_mode"), user.get("show_cs_features"))
-    return {
-        **user,
-        "completed_courses": decode_completed_courses(user.get("completed_courses_json")),
-        "completed_course_details": decode_completed_course_details(user.get("completed_course_details_json")),
-        "in_progress_courses": decode_completed_courses(user.get("in_progress_courses_json")),
-        "in_progress_course_details": decode_completed_course_details(user.get("in_progress_course_details_json")),
-        "include_implied_prereqs": True if raw_implied is None else bool(raw_implied),
-        "major_mode": mode,
-        "show_cs_features": show_cs,
-        "minor_prefs": decode_minor_prefs(user.get("minor_prefs_json")),
-    }
+    return decode_user_record(user)
 
 
 async def get_admin_user(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:

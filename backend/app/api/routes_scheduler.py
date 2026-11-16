@@ -6,8 +6,9 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.api.deps import get_catalog, get_insights, get_scheduler
 from app.api.schemas import (
     AddScheduleCourseRequest,
     ApplyGeneratedScheduleRequest,
@@ -23,20 +24,8 @@ from app.services.catalog import CatalogSyncService
 from app.services.insights import CourseInsightsService
 from app.services.scheduler import SchedulerService
 
-
-def get_insights(request: Request) -> CourseInsightsService:
-    return request.app.state.insights
-
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/schedules", tags=["scheduler"])
-
-
-def get_scheduler(request: Request) -> SchedulerService:
-    return request.app.state.scheduler
-
-
-def get_catalog(request: Request) -> CatalogSyncService:
-    return request.app.state.catalog
 
 
 @router.get("/shared/{token}")
@@ -173,10 +162,10 @@ async def delete_schedule(
     scheduler: SchedulerService = Depends(get_scheduler),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
-    sched = await scheduler.hydrate_schedule(schedule_id, user_id=int(user["id"]), user=user)
+    sched = await scheduler._get_owned_schedule(schedule_id, user_id=int(user["id"]))
     if sched is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    target_roster = (roster or sched["schedule"]["roster"] or await catalog.get_default_roster_slug()).upper()
+    target_roster = (roster or str(sched["roster"]) or await catalog.get_default_roster_slug()).upper()
     ok = await scheduler.delete_schedule(schedule_id, user_id=int(user["id"]))
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
@@ -384,6 +373,9 @@ async def batch_load_schedule_insights(
                     exc,
                 )
                 return False
+
+    if not courses_to_load:
+        return {**hydrated, "insights_fetched_count": 0}
 
     results = await asyncio.gather(*(_fetch_one(c) for c in courses_to_load))
     refreshed = await scheduler.hydrate_schedule(schedule_id, user_id=int(user["id"]), user=user)

@@ -13,7 +13,12 @@ from app.config import Settings
 from app.db import Database
 from app.providers.cornell import is_ithaca_or_virtual_section
 from app.services.catalog import CatalogSyncService
-from app.services.insights import build_external_links, normalize_instructor_query
+from app.services.common import chunk_list, decode_json_list
+from app.services.insights import (
+    build_external_links,
+    extract_unique_instructors,
+    normalize_instructor_query,
+)
 
 _TIME_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*([AP]M)?\s*$", re.IGNORECASE)
 _SUMMARY_SLOT_RE = re.compile(
@@ -135,6 +140,85 @@ def _parse_summary_fallback_meetings(summary: str, instructors_summary: str) -> 
     return meetings
 
 
+def _build_normalized_section(
+    *,
+    class_nbr: int,
+    eg_idx: int,
+    ssr_component: str,
+    section: str,
+    open_status: str,
+    req_comps: list[str],
+    meetings_summary: str,
+    instructors_summary: str,
+    instructors: list[str],
+    campus: str,
+    location: str,
+    location_descr: str,
+    instruction_mode: str,
+    topic_description: str,
+    updated_at: Any,
+    meetings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "class_nbr": class_nbr,
+        "enroll_group_idx": eg_idx,
+        "ssr_component": ssr_component,
+        "section": section,
+        "open_status": open_status,
+        "components_required": req_comps,
+        "meetings_summary": meetings_summary,
+        "instructors_summary": instructors_summary,
+        "instructors": instructors,
+        "campus": campus,
+        "location": location,
+        "location_descr": location_descr,
+        "instruction_mode": instruction_mode,
+        "is_ithaca_or_virtual": is_ithaca_or_virtual_section(
+            campus=campus,
+            location=location,
+            instruction_mode=instruction_mode,
+        ),
+        "topic_description": topic_description,
+        "updated_at": updated_at,
+        "meetings": meetings,
+    }
+
+
+def _section_from_live_row(
+    live: dict[str, Any],
+    eg_idx: int,
+    req_comps: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    meetings_summary = str(live.get("meetings_summary") or "TBA")
+    instructors_summary = str(live.get("instructors_summary") or "Staff")
+    campus = str(live.get("campus") or "")
+    location = str(live.get("location") or "")
+    instruction_mode = str(live.get("instruction_mode") or "")
+    resolved_comps = (
+        req_comps
+        if req_comps is not None
+        else [str(x) for x in decode_json_list(live.get("components_required_json"))]
+    )
+    return _build_normalized_section(
+        class_nbr=int(live["class_nbr"]),
+        eg_idx=eg_idx,
+        ssr_component=str(live.get("ssr_component") or "").strip().upper(),
+        section=str(live.get("section") or "").strip(),
+        open_status=str(live.get("open_status") or "C").strip().upper(),
+        req_comps=resolved_comps,
+        meetings_summary=meetings_summary,
+        instructors_summary=instructors_summary,
+        instructors=extract_unique_instructors([instructors_summary]),
+        campus=campus,
+        location=location,
+        location_descr=str(live.get("location_descr") or ""),
+        instruction_mode=instruction_mode,
+        topic_description="",
+        updated_at=live.get("updated_at"),
+        meetings=_parse_summary_fallback_meetings(meetings_summary, instructors_summary),
+    )
+
+
 def normalize_enroll_groups(
     raw_enroll_groups: list[dict[str, Any]],
     section_rows: list[dict[str, Any]],
@@ -241,71 +325,29 @@ def normalize_enroll_groups(
                 )
 
                 sections_out.append(
-                    {
-                        "class_nbr": class_nbr,
-                        "enroll_group_idx": eg_idx,
-                        "ssr_component": str(raw_sec.get("ssrComponent") or "").strip().upper(),
-                        "section": str(raw_sec.get("section") or "").strip(),
-                        "open_status": open_status,
-                        "components_required": req_comps,
-                        "meetings_summary": meetings_summary,
-                        "instructors_summary": instructors_summary,
-                        "instructors": all_instructors,
-                        "campus": campus,
-                        "location": location,
-                        "location_descr": location_descr,
-                        "instruction_mode": instruction_mode,
-                        "is_ithaca_or_virtual": is_ithaca_or_virtual_section(
-                            campus=campus,
-                            location=location,
-                            instruction_mode=instruction_mode,
-                        ),
-                        "topic_description": str(raw_sec.get("topicDescription") or "").strip(),
-                        "updated_at": live.get("updated_at") if live else None,
-                        "meetings": meetings_out,
-                    }
+                    _build_normalized_section(
+                        class_nbr=class_nbr,
+                        eg_idx=eg_idx,
+                        ssr_component=str(raw_sec.get("ssrComponent") or "").strip().upper(),
+                        section=str(raw_sec.get("section") or "").strip(),
+                        open_status=open_status,
+                        req_comps=req_comps,
+                        meetings_summary=meetings_summary,
+                        instructors_summary=instructors_summary,
+                        instructors=all_instructors,
+                        campus=campus,
+                        location=location,
+                        location_descr=location_descr,
+                        instruction_mode=instruction_mode,
+                        topic_description=str(raw_sec.get("topicDescription") or "").strip(),
+                        updated_at=live.get("updated_at") if live else None,
+                        meetings=meetings_out,
+                    )
                 )
         else:
             for live in rows_by_eg.get(eg_idx, []):
-                class_nbr = int(live["class_nbr"])
-                seen_class_nbrs.add(class_nbr)
-                meetings_out = _parse_summary_fallback_meetings(
-                    str(live.get("meetings_summary") or ""),
-                    str(live.get("instructors_summary") or ""),
-                )
-                instrs = [
-                    n.strip()
-                    for n in str(live.get("instructors_summary") or "").split(",")
-                    if n.strip() and n.strip().lower() != "staff"
-                ]
-                campus = str(live.get("campus") or "")
-                location = str(live.get("location") or "")
-                instruction_mode = str(live.get("instruction_mode") or "")
-                sections_out.append(
-                    {
-                        "class_nbr": class_nbr,
-                        "enroll_group_idx": eg_idx,
-                        "ssr_component": str(live.get("ssr_component") or "").strip().upper(),
-                        "section": str(live.get("section") or "").strip(),
-                        "open_status": str(live.get("open_status") or "C").strip().upper(),
-                        "components_required": req_comps,
-                        "meetings_summary": str(live.get("meetings_summary") or "TBA"),
-                        "instructors_summary": str(live.get("instructors_summary") or "Staff"),
-                        "instructors": instrs,
-                        "campus": campus,
-                        "location": location,
-                        "location_descr": str(live.get("location_descr") or ""),
-                        "instruction_mode": instruction_mode,
-                        "is_ithaca_or_virtual": is_ithaca_or_virtual_section(
-                            campus=campus,
-                            location=location,
-                            instruction_mode=instruction_mode,
-                        ),
-                        "topic_description": "",
-                        "updated_at": live.get("updated_at"),
-                        "meetings": meetings_out,
-                    }
-                )
+                seen_class_nbrs.add(int(live["class_nbr"]))
+                sections_out.append(_section_from_live_row(live, eg_idx, req_comps=req_comps))
 
         if not req_comps and sections_out:
             seen_comp: list[str] = []
@@ -327,7 +369,6 @@ def normalize_enroll_groups(
             }
         )
 
-    # Append any orphan live sections not present in raw enroll_groups
     for row in section_rows:
         class_nbr = int(row["class_nbr"])
         if class_nbr in seen_class_nbrs:
@@ -346,37 +387,7 @@ def normalize_enroll_groups(
                     "sections": [],
                 }
             )
-        campus = str(row.get("campus") or "")
-        location = str(row.get("location") or "")
-        instruction_mode = str(row.get("instruction_mode") or "")
-        normalized_groups[eg_idx]["sections"].append(
-            {
-                "class_nbr": class_nbr,
-                "enroll_group_idx": eg_idx,
-                "ssr_component": str(row.get("ssr_component") or "").strip().upper(),
-                "section": str(row.get("section") or "").strip(),
-                "open_status": str(row.get("open_status") or "C").strip().upper(),
-                "components_required": json.loads(row.get("components_required_json") or "[]"),
-                "meetings_summary": str(row.get("meetings_summary") or "TBA"),
-                "instructors_summary": str(row.get("instructors_summary") or "Staff"),
-                "instructors": [],
-                "campus": campus,
-                "location": location,
-                "location_descr": str(row.get("location_descr") or ""),
-                "instruction_mode": instruction_mode,
-                "is_ithaca_or_virtual": is_ithaca_or_virtual_section(
-                    campus=campus,
-                    location=location,
-                    instruction_mode=instruction_mode,
-                ),
-                "topic_description": "",
-                "updated_at": row.get("updated_at"),
-                "meetings": _parse_summary_fallback_meetings(
-                    str(row.get("meetings_summary") or ""),
-                    str(row.get("instructors_summary") or ""),
-                ),
-            }
-        )
+        normalized_groups[eg_idx]["sections"].append(_section_from_live_row(row, eg_idx))
 
     return normalized_groups
 
@@ -419,29 +430,17 @@ def _pick_default_sections(enroll_groups: list[dict[str, Any]]) -> list[int]:
 
 
 def _decode_int_list(raw: Any) -> list[int]:
-    if isinstance(raw, list):
-        return [int(x) for x in raw]
-    if isinstance(raw, str) and raw:
+    out: list[int] = []
+    for x in decode_json_list(raw):
         try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, list):
-                return [int(x) for x in loaded]
-        except (ValueError, TypeError):
-            pass
-    return []
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _decode_str_list(raw: Any) -> list[str]:
-    if isinstance(raw, list):
-        return [str(x) for x in raw]
-    if isinstance(raw, str) and raw:
-        try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, list):
-                return [str(x) for x in loaded]
-        except ValueError:
-            pass
-    return []
+    return [str(x) for x in decode_json_list(raw)]
 
 
 class SchedulerService:
@@ -649,6 +648,24 @@ class SchedulerService:
                     await conn.execute("UPDATE schedules SET is_active = 1 WHERE id = ?", (row["id"],))
         return True
 
+    async def _fetch_course_sections(
+        self,
+        roster_u: str,
+        subject_u: str,
+        nbr: str,
+    ) -> list[dict[str, Any]]:
+        return await self.db.fetch_all(
+            """
+            SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
+                   components_required_json, meetings_summary, instructors_summary,
+                   campus, location, location_descr, instruction_mode, updated_at
+            FROM roster_sections
+            WHERE roster = ? AND subject = ? AND catalog_nbr = ?
+            ORDER BY enroll_group_idx ASC, class_nbr ASC
+            """,
+            (roster_u, subject_u, nbr),
+        )
+
     async def add_course(
         self,
         schedule_id: int,
@@ -661,7 +678,8 @@ class SchedulerService:
         locked_class_nbrs: Optional[list[int]] = None,
         color_idx: Optional[int] = None,
         allow_transcript_mutation: bool = False,
-    ) -> dict[str, Any]:
+        hydrate: bool = True,
+    ) -> Optional[dict[str, Any]]:
         sched = await self._get_owned_schedule(schedule_id, user_id)
         if sched is None:
             raise LookupError("Schedule not found")
@@ -704,17 +722,7 @@ class SchedulerService:
         if meta is None:
             raise LookupError(f"Course {subject_u} {nbr_clean} not found in {roster_u}")
 
-        sec_rows = await self.db.fetch_all(
-            """
-            SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
-                   components_required_json, meetings_summary, instructors_summary,
-                   campus, location, location_descr, instruction_mode, updated_at
-            FROM roster_sections
-            WHERE roster = ? AND subject = ? AND catalog_nbr = ?
-            ORDER BY enroll_group_idx ASC, class_nbr ASC
-            """,
-            (roster_u, subject_u, nbr_clean),
-        )
+        sec_rows = await self._fetch_course_sections(roster_u, subject_u, nbr_clean)
         raw_egs = orjson.loads(meta["enroll_groups_json"]) if meta.get("enroll_groups_json") else []
         norm_egs = normalize_enroll_groups(raw_egs, sec_rows)
 
@@ -765,6 +773,8 @@ class SchedulerService:
                 (schedule_id,),
             )
 
+        if not hydrate:
+            return None
         return await self.hydrate_schedule(schedule_id, user_id=user_id)
 
     async def merge_imported_courses(
@@ -905,17 +915,7 @@ class SchedulerService:
                         (roster_u, subj, nbr),
                     )
                     if meta is not None:
-                        sec_rows = await self.db.fetch_all(
-                            """
-                            SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
-                                   components_required_json, meetings_summary, instructors_summary,
-                                   campus, location, location_descr, instruction_mode, updated_at
-                            FROM roster_sections
-                            WHERE roster = ? AND subject = ? AND catalog_nbr = ?
-                            ORDER BY enroll_group_idx ASC, class_nbr ASC
-                            """,
-                            (roster_u, subj, nbr),
-                        )
+                        sec_rows = await self._fetch_course_sections(roster_u, subj, nbr)
                         raw_egs = orjson.loads(meta["enroll_groups_json"]) if meta.get("enroll_groups_json") else []
                         norm_egs = normalize_enroll_groups(raw_egs, sec_rows)
                         default_secs = _pick_default_sections(norm_egs)
@@ -929,6 +929,7 @@ class SchedulerService:
                         user_id=user_id,
                         selected_units=upd_units,
                         selected_class_nbrs=upd_selected,
+                        hydrate=False,
                     )
                     updated.append(code)
                 else:
@@ -944,6 +945,7 @@ class SchedulerService:
                     enabled=True,
                     selected_units=parsed_units,
                     allow_transcript_mutation=True,
+                    hydrate=False,
                 )
                 added.append(code)
             except FileExistsError:
@@ -971,6 +973,7 @@ class SchedulerService:
         selected_class_nbrs: Optional[list[int]] = None,
         locked_class_nbrs: Optional[list[int]] = None,
         color_idx: Optional[int] = None,
+        hydrate: bool = True,
     ) -> Optional[dict[str, Any]]:
         sched = await self._get_owned_schedule(schedule_id, user_id)
         if sched is None:
@@ -1028,6 +1031,8 @@ class SchedulerService:
                 "UPDATE schedules SET updated_at = datetime('now') WHERE id = ?",
                 (schedule_id,),
             )
+        if not hydrate:
+            return None
         return await self.hydrate_schedule(schedule_id, user_id=user_id)
 
     async def apply_generated(
@@ -1248,73 +1253,105 @@ class SchedulerService:
                 if u_row.get("major_mode") == "ilr":
                     ilr_index = await self.catalog.get_ilr_requirements_index(roster_u)
 
-        courses_out: list[dict[str, Any]] = []
-        for item in item_rows:
-            subj = str(item["subject"]).upper()
-            nbr = str(item["catalog_nbr"])
-            meta = await self.db.fetch_one(
-                """
-                SELECT title_short, title_long, description, acad_career, acad_group,
-                       catalog_prereq, catalog_coreq, catalog_forbidden_overlaps,
-                       units_min, units_max, has_letter_grade, crosslists_json,
-                       components_json, enroll_groups_json, updated_at
-                FROM courses_meta
-                WHERE roster = ? AND subject = ? AND catalog_nbr = ?
-                """,
-                (roster_u, subj, nbr),
+        # Batch-load metadata, sections, subject freshness, CU Reviews, and RMP caches for all items
+        item_pairs = sorted({(str(item["subject"]).upper(), str(item["catalog_nbr"])) for item in item_rows})
+        meta_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        secs_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        cu_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        freshness_by_subj: dict[str, tuple[bool, Optional[str]]] = {}
+
+        if item_pairs:
+            freshness_by_subj = await self.catalog.get_subject_freshness_map(
+                roster_u,
+                {su for su, _ in item_pairs},
             )
-            sec_rows = await self.db.fetch_all(
-                """
-                SELECT class_nbr, enroll_group_idx, ssr_component, section, open_status,
-                       components_required_json, meetings_summary, instructors_summary,
-                       campus, location, location_descr, instruction_mode, updated_at
-                FROM roster_sections
-                WHERE roster = ? AND subject = ? AND catalog_nbr = ?
-                ORDER BY enroll_group_idx ASC, class_nbr ASC
-                """,
-                (roster_u, subj, nbr),
-            )
+            for chunk in chunk_list(item_pairs, 150):
+                clauses = " OR ".join("(subject = ? AND catalog_nbr = ?)" for _ in chunk)
+                pair_params: list[Any] = []
+                for su, nb in chunk:
+                    pair_params.extend((su, nb))
+
+                meta_rows = await self.db.fetch_all(
+                    f"""
+                    SELECT subject, catalog_nbr, title_short, title_long, description,
+                           acad_career, acad_group, catalog_prereq, catalog_coreq,
+                           catalog_forbidden_overlaps, units_min, units_max, has_letter_grade,
+                           crosslists_json, components_json, enroll_groups_json, updated_at
+                    FROM courses_meta
+                    WHERE roster = ? AND ({clauses})
+                    """,
+                    (roster_u, *pair_params),
+                )
+                for mr in meta_rows:
+                    meta_by_key[(str(mr["subject"]).upper(), str(mr["catalog_nbr"]))] = mr
+
+                all_sec_rows = await self.db.fetch_all(
+                    f"""
+                    SELECT subject, catalog_nbr, class_nbr, enroll_group_idx, ssr_component,
+                           section, open_status, components_required_json, meetings_summary,
+                           instructors_summary, campus, location, location_descr,
+                           instruction_mode, updated_at
+                    FROM roster_sections
+                    WHERE roster = ? AND ({clauses})
+                    ORDER BY enroll_group_idx ASC, class_nbr ASC
+                    """,
+                    (roster_u, *pair_params),
+                )
+                for sr in all_sec_rows:
+                    secs_by_key.setdefault((str(sr["subject"]).upper(), str(sr["catalog_nbr"])), []).append(sr)
+
+                cu_rows = await self.db.fetch_all(
+                    f"""
+                    SELECT subject, catalog_nbr, payload_json, found
+                    FROM course_insights_cache
+                    WHERE {clauses}
+                    """,
+                    tuple(pair_params),
+                )
+                for cu_cache in cu_rows:
+                    if int(cu_cache.get("found") or 0) == 1:
+                        try:
+                            cu_payload = orjson.loads(cu_cache["payload_json"])
+                            cu_by_key[(str(cu_cache["subject"]).upper(), str(cu_cache["catalog_nbr"]))] = {
+                                "rating": cu_payload.get("rating"),
+                                "difficulty": cu_payload.get("difficulty"),
+                                "workload": cu_payload.get("workload"),
+                                "review_count": cu_payload.get("review_count") or 0,
+                            }
+                        except Exception:
+                            pass
+
+        norm_egs_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        all_rmp_keys: set[str] = set()
+        instr_key_by_name: dict[str, str] = {}
+        for subj, nbr in item_pairs:
+            meta = meta_by_key.get((subj, nbr))
+            sec_rows = secs_by_key.get((subj, nbr), [])
             raw_egs = orjson.loads(meta["enroll_groups_json"]) if (meta and meta.get("enroll_groups_json")) else []
             norm_egs = normalize_enroll_groups(raw_egs, sec_rows)
-            is_fresh, eff_iso = await self.catalog._get_subject_freshness(roster_u, subj)
-
-            # Read cached CU Reviews + RMP metrics locally (zero external network calls)
-            cu_cache = await self.db.fetch_one(
-                "SELECT payload_json, found FROM course_insights_cache WHERE subject = ? AND catalog_nbr = ?",
-                (subj, nbr),
-            )
-            cu_summary: Optional[dict[str, Any]] = None
-            if cu_cache and int(cu_cache.get("found") or 0) == 1:
-                try:
-                    cu_payload = orjson.loads(cu_cache["payload_json"])
-                    cu_summary = {
-                        "rating": cu_payload.get("rating"),
-                        "difficulty": cu_payload.get("difficulty"),
-                        "workload": cu_payload.get("workload"),
-                        "review_count": cu_payload.get("review_count") or 0,
-                    }
-                except Exception:
-                    cu_summary = None
-
-            rmp_summary: dict[str, dict[str, Any]] = {}
-            instr_names: set[str] = set()
+            norm_egs_by_key[(subj, nbr)] = norm_egs
             for eg in norm_egs:
                 for sec in eg["sections"]:
                     for nm in sec.get("instructors") or []:
-                        instr_names.add(nm)
-            for nm in instr_names:
-                cleaned_query, _, _ = normalize_instructor_query(nm)
-                key = cleaned_query.lower() or nm.strip().lower()
-                if not key:
-                    continue
-                rmp_row = await self.db.fetch_one(
-                    "SELECT payload_json, found FROM rmp_instructor_cache WHERE name_key = ?",
-                    (key,),
-                )
-                if rmp_row and int(rmp_row.get("found") or 0) == 1:
+                        if nm not in instr_key_by_name:
+                            cleaned_query, _, _ = normalize_instructor_query(nm)
+                            k = cleaned_query.lower() or nm.strip().lower()
+                            instr_key_by_name[nm] = k
+                            if k:
+                                all_rmp_keys.add(k)
+
+        rmp_by_key: dict[str, dict[str, Any]] = {}
+        for chunk in chunk_list(sorted(all_rmp_keys), 200):
+            qmarks = ", ".join("?" for _ in chunk)
+            rmp_rows = await self.db.fetch_all(
+                f"SELECT name_key, payload_json, found FROM rmp_instructor_cache WHERE name_key IN ({qmarks})",
+                tuple(chunk),
+            )
+            for rmp_row in rmp_rows:
+                if int(rmp_row.get("found") or 0) == 1:
                     try:
                         rp = orjson.loads(rmp_row["payload_json"])
-                        rmp_summary[nm] = {
+                        rmp_by_key[str(rmp_row["name_key"])] = {
                             "avg_rating": rp.get("avg_rating"),
                             "avg_difficulty": rp.get("avg_difficulty"),
                             "num_ratings": rp.get("num_ratings") or 0,
@@ -1322,6 +1359,23 @@ class SchedulerService:
                         }
                     except Exception:
                         pass
+
+        courses_out: list[dict[str, Any]] = []
+        for item in item_rows:
+            subj = str(item["subject"]).upper()
+            nbr = str(item["catalog_nbr"])
+            meta = meta_by_key.get((subj, nbr))
+            norm_egs = norm_egs_by_key.get((subj, nbr), [])
+            is_fresh, eff_iso = freshness_by_subj.get(subj, (False, None))
+            cu_summary = cu_by_key.get((subj, nbr))
+
+            rmp_summary: dict[str, dict[str, Any]] = {}
+            for eg in norm_egs:
+                for sec in eg["sections"]:
+                    for nm in sec.get("instructors") or []:
+                        k = instr_key_by_name.get(nm, "")
+                        if k and k in rmp_by_key:
+                            rmp_summary[nm] = rmp_by_key[k]
 
             cs_elig_dict: Optional[dict[str, Any]] = None
             if cs_index is not None:

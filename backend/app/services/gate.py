@@ -29,8 +29,6 @@ class CornellRequestGate:
         self._busy = False
         self._seq = 0
         self._waiters: list[_Waiter] = []
-        self._last_request_mono: float = 0.0
-        self._last_poller_mono: float = 0.0
         self._last_catalog_mono: float = 0.0
         self._backoff_until_mono: float = 0.0
         self._poller_waiters: int = 0
@@ -49,21 +47,9 @@ class CornellRequestGate:
     def poller_is_pending(self) -> bool:
         return self._poller_waiters > 0
 
-    def last_request_age_sec(self) -> float:
-        if self._last_request_mono <= 0.0:
-            return 9999.0
-        return max(0.0, time.monotonic() - self._last_request_mono)
-
-    def backoff_remaining_sec(self) -> float:
-        return max(0.0, self._backoff_until_mono - time.monotonic())
-
     def record_request_started(self, priority: int) -> None:
-        now = time.monotonic()
-        self._last_request_mono = now
-        if priority == PRIORITY_POLLER:
-            self._last_poller_mono = now
-        else:
-            self._last_catalog_mono = now
+        if priority > PRIORITY_POLLER:
+            self._last_catalog_mono = time.monotonic()
 
     def record_rate_limit(self, retry_after_sec: float) -> None:
         until = time.monotonic() + max(5.0, float(retry_after_sec))

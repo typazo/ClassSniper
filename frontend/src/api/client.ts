@@ -125,6 +125,7 @@ export const api = {
       attr_match?: AttrMatchMode;
       minor?: string;
       minor_version?: string;
+      minor_college?: string;
       minor_categories?: string[];
       minor_completed?: string[];
       minor_hide_completed?: boolean;
@@ -166,6 +167,7 @@ export const api = {
     if (options?.attr_match) params.set("attr_match", options.attr_match);
     if (options?.minor) params.set("minor", options.minor);
     if (options?.minor_version) params.set("minor_version", options.minor_version);
+    if (options?.minor_college) params.set("minor_college", options.minor_college);
     if (options?.minor_categories && options.minor_categories.length > 0) {
       params.set("minor_categories", options.minor_categories.join(","));
     }
@@ -196,10 +198,15 @@ export const api = {
     request<{ roster: string; attributes: AttributeOption[] }>(
       `/api/courses/attributes?roster=${encodeURIComponent(roster)}`
     ),
-  getMinorsCatalog: (roster?: string) =>
-    request<{ roster: string; minors: MinorCatalogItem[] }>(
-      `/api/minors/catalog${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`
-    ),
+  getMinorsCatalog: (roster?: string, college?: string) => {
+    const params = new URLSearchParams();
+    if (roster) params.set("roster", roster);
+    if (college) params.set("college", college);
+    const qs = params.toString();
+    return request<{ roster: string; minors: MinorCatalogItem[] }>(
+      `/api/minors/catalog${qs ? `?${qs}` : ""}`
+    );
+  },
   getCsChecklist: (roster?: string) =>
     request<CsChecklistPayload>(
       `/api/cs/checklist${roster ? `?roster=${encodeURIComponent(roster)}` : ""}`

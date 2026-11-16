@@ -1336,10 +1336,12 @@ class CatalogSyncService:
         attr_match: str = "any",
         minor: str = "",
         minor_version: str = "",
+        minor_college: str = "",
         minor_categories: Optional[list[str]] = None,
         minor_completed_categories: Optional[list[str]] = None,
         minor_hide_completed: bool = True,
         completed_courses: Optional[list[str]] = None,
+        taken_course_details: Optional[dict[str, dict[str, str]]] = None,
         only_eligible: bool = False,
         include_implied_prereqs: bool = True,
         ithaca_or_virtual: bool = True,
@@ -1572,6 +1574,9 @@ class CatalogSyncService:
                     minor_ver,
                     completed_categories=minor_done_set,
                     active_categories=minor_cat_set,
+                    college=minor_college,
+                    taken_courses=completed_courses,
+                    taken_course_details=taken_course_details,
                 )
                 if course_matches_minor_filter(
                     ev,
@@ -1759,6 +1764,9 @@ class CatalogSyncService:
         roster: str,
         completed_courses: Optional[list[str]] = None,
         in_progress_courses: Optional[list[str]] = None,
+        college_by_minor: Optional[dict[str, str]] = None,
+        completed_course_details: Optional[dict[str, dict[str, str]]] = None,
+        in_progress_course_details: Optional[dict[str, dict[str, str]]] = None,
     ) -> dict[str, Any]:
         """Return Cornell minor definitions, live roster course counts, and user auto-fill matches."""
         roster_u = roster.upper()
@@ -1817,6 +1825,9 @@ class CatalogSyncService:
                 completed_courses=completed_courses,
                 in_progress_courses=in_progress_courses,
                 meta_by_code=meta_by_code,
+                college_by_minor=college_by_minor,
+                completed_course_details=completed_course_details,
+                in_progress_course_details=in_progress_course_details,
             ),
         }
 

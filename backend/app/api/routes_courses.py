@@ -120,6 +120,7 @@ async def search_courses(
     attr_match: Literal["any", "all"] = Query(default="any"),
     minor: str = Query(default="", max_length=40),
     minor_version: str = Query(default="", max_length=60),
+    minor_college: str = Query(default="", max_length=40),
     minor_categories: str = Query(default="", max_length=400),
     minor_completed: Optional[str] = Query(default=None, max_length=400),
     minor_hide_completed: Optional[bool] = Query(default=None),
@@ -142,11 +143,16 @@ async def search_courses(
     minor_id = minor.strip().lower()
     user_minor_prefs = user.get("minor_prefs") or {}
     saved_versions = user_minor_prefs.get("versions") or {}
+    saved_colleges = user_minor_prefs.get("colleges") or {}
     saved_completed_map = user_minor_prefs.get("completed_categories") or {}
 
     resolved_minor_version = (
         minor_version.strip().lower()
         or str(saved_versions.get(minor_id) or "").strip().lower()
+    )
+    resolved_minor_college = (
+        minor_college.strip().lower()
+        or str(saved_colleges.get(minor_id) or "").strip().lower()
     )
     parsed_minor_categories = [
         c.strip().lower() for c in minor_categories.split(",") if c.strip()
@@ -179,6 +185,9 @@ async def search_courses(
             *list(user.get("in_progress_courses") or []),
         ]
     )
+    completed_course_details = dict(user.get("completed_course_details") or {})
+    in_progress_course_details = dict(user.get("in_progress_course_details") or {})
+    combined_course_details = {**in_progress_course_details, **completed_course_details}
     effective_implied = (
         bool(user.get("include_implied_prereqs", True))
         if include_implied_prereqs is None
@@ -203,10 +212,12 @@ async def search_courses(
         attr_match=attr_match,
         minor=minor_id,
         minor_version=resolved_minor_version,
+        minor_college=resolved_minor_college,
         minor_categories=parsed_minor_categories,
         minor_completed_categories=parsed_minor_completed,
         minor_hide_completed=effective_hide_completed,
         completed_courses=completed_courses,
+        taken_course_details=combined_course_details,
         only_eligible=only_eligible,
         include_implied_prereqs=effective_implied,
         ithaca_or_virtual=ithaca_or_virtual,
@@ -234,14 +245,21 @@ async def get_course_attribute_options(
 @router.get("/minors/catalog")
 async def get_minors_catalog(
     roster: Optional[str] = Query(default=None, min_length=3, max_length=10),
+    college: Optional[str] = Query(default=None, max_length=40),
     user: dict[str, Any] = Depends(get_current_user),
     catalog: CatalogSyncService = Depends(get_catalog),
 ) -> dict[str, Any]:
     target_roster = (roster or await catalog.get_default_roster_slug()).upper()
+    saved_colleges = dict((user.get("minor_prefs") or {}).get("colleges") or {})
+    if college and college.strip():
+        saved_colleges["info_science"] = college.strip().lower()
     return await catalog.get_minors_catalog(
         target_roster,
         completed_courses=list(user.get("completed_courses") or []),
         in_progress_courses=list(user.get("in_progress_courses") or []),
+        college_by_minor=saved_colleges,
+        completed_course_details=dict(user.get("completed_course_details") or {}),
+        in_progress_course_details=dict(user.get("in_progress_course_details") or {}),
     )
 
 

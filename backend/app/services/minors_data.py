@@ -29,6 +29,17 @@ SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 @dataclass(frozen=True)
+class MinorCollegeDef:
+    """College-specific curriculum variant for a minor (e.g., A&S/CALS vs Engineering vs Hotel)."""
+
+    id: str
+    label: str
+    short_label: str
+    total_required_summary: str
+    note: str
+
+
+@dataclass(frozen=True)
 class MinorCategoryDef:
     """One completable requirement category or part inside a minor track."""
 
@@ -41,6 +52,8 @@ class MinorCategoryDef:
     courses: frozenset[str] = frozenset()
     wildcard_courses: frozenset[str] = frozenset()
     dynamic_rule: Optional[str] = None
+    required_count: Optional[int] = None
+    required_credits: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,8 @@ class MinorDef:
     default_version: str
     overview: str
     versions: tuple[MinorVersionDef, ...]
+    default_college: str = ""
+    colleges: tuple[MinorCollegeDef, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -405,76 +420,51 @@ _IS_ALL_CONCENTRATION_COURSES = (
     | _IS_UX
 )
 
+_IS_HOTEL_REQUIRED = frozenset({"HADM 3740", "HADM 4760"})
+_IS_HOTEL_EXTRA_ELECTIVES = frozenset({"AEM 3220"})
+
+INFO_SCIENCE_COLLEGES: tuple[MinorCollegeDef, ...] = (
+    MinorCollegeDef(
+        id="as_cals",
+        label="Arts & Sciences / CALS / Other (6 courses)",
+        short_label="A&S / CALS (6)",
+        total_required_summary="6 courses (1 Core + 3 Conc + 2 Elec)",
+        note=(
+            "A&S, CALS, AAP, Human Ecology, ILR, Dyson, & Brooks: 1 Core + 3 Concentration + 2 Electives. "
+            "Extra Core courses count as Electives; 1 course cannot double-count within the minor (C or higher)."
+        ),
+    ),
+    MinorCollegeDef(
+        id="engineering",
+        label="Engineering (5 courses)",
+        short_label="Engineering (5)",
+        total_required_summary="5 courses (1 Core + 3 Conc + 1 Elec)",
+        note=(
+            "Duffield College of Engineering: 1 Core + 3 Concentration + 1 Elective "
+            "(can come from any concentration or Core, incl. INFO 1300). No double-counting within the minor (C or higher)."
+        ),
+    ),
+    MinorCollegeDef(
+        id="hotel",
+        label="Nolan Hotel School (6 courses)",
+        short_label="Nolan Hotel (6)",
+        total_required_summary="6 courses (1 Core + 2 Conc + HADM 3740/4760 + 1 Elec)",
+        note=(
+            "Nolan School of Hotel Administration: 1 Core + 2 Concentration + HADM 3740 + HADM 4760 "
+            "+ 1 Elective (INFO 1300 & AEM 3220 count as Electives). No double-counting within the minor (C or higher)."
+        ),
+    ),
+)
+_IS_COLLEGES_BY_ID: dict[str, MinorCollegeDef] = {c.id: c for c in INFO_SCIENCE_COLLEGES}
+
 
 # ---------------------------------------------------------------------------
-# 7. Psychology (psychology.cornell.edu/minor & /major)
+# 7. Psychology (psychology.cornell.edu/minor & catalog.cornell.edu)
 # ---------------------------------------------------------------------------
+# Psychology minor requires 18 PSYCH credits (up to 6 cr 4700/4710 Research;
+# no FWS or AP). Breadth across the 4 areas is recommended, not required.
 
-_PSYCH_COGNITION = frozenset({
-    "PSYCH 1102", "COGST 1101", "HD 1102", "LING 1170", "PHIL 1620", "CS 1710",
-    "PSYCH 2050", "COGST 2050", "HD 2050",
-    "PSYCH 2150", "COGST 2150", "LING 2215",
-    "PSYCH 2200", "HD 2200",
-    "PSYCH 2580", "HD 2580", "ILRGL 2580", "SOC 2580",
-    "PSYCH 3140", "COGST 3140", "INFO 3140",
-    "PSYCH 3160", "PSYCH 3190", "COGST 3190", "HD 3190",
-    "PSYCH 3350", "PSYCH 3420", "COGST 3420", "VISST 3342",
-    "PSYCH 4120", "PSYCH 4150", "COGST 4150", "COML 4229",
-    "PSYCH 4180", "PSYCH 4220", "PSYCH 4270", "PSYCH 4280",
-    "PSYCH 4320", "COGST 4310", "BIONB 4330", "PSYCH 4331",
-    "PSYCH 4360", "COGST 4360", "PSYCH 4370", "PSYCH 4410", "PSYCH 4650",
-})
-
-_PSYCH_DEVELOPMENT = frozenset({
-    "PSYCH 1131", "HD 1130",
-    "PSYCH 2090", "COGST 2090", "HD 2090",
-    "HD 2150", "HD 2170", "HD 2180", "HD 3290",
-    "PSYCH 3310", "HD 3300",
-    "PSYCH 3440", "HD 3440",
-    "PSYCH 4550", "HD 4550",
-    "PSYCH 4770", "PSYCH 4780",
-})
-
-_PSYCH_NEURO = frozenset({
-    "HD 2200", "PSYCH 2200",
-    "PSYCH 2230", "COGST 2230", "HD 2230",
-    "PSYCH 2300", "COGST 2350", "HD 2310",
-    "PSYCH 3020", "COGST 3020",
-    "PSYCH 3150", "NS 3150",
-    "PSYCH 3220", "PSYCH 3240", "PSYCH 3260",
-    "HD 3250", "PSYCH 3300", "BIONB 3300", "BME 3300", "COGST 3300",
-    "PSYCH 3320", "HD 3530", "COGST 3530",
-    "PSYCH 4200", "PSYCH 4230", "COGST 4230", "PSYCH 4240",
-    "PSYCH 4250", "PSYCH 4260", "PSYCH 4350", "PSYCH 4390",
-    "PSYCH 4400", "PSYCH 4600",
-})
-
-_PSYCH_SOCIAL = frozenset({
-    "PSYCH 1500", "COGST 1500", "DEA 1500",
-    "PSYCH 2100", "COGST 2100",
-    "PSYCH 2120",
-    "PSYCH 2250", "HD 2250",
-    "PSYCH 2400", "HD 2400",
-    "PSYCH 2415", "COGST 2415", "PHIL 2415",
-    "PSYCH 2450",
-    "PSYCH 2620", "HD 2620",
-    "PSYCH 2650", "HD 2650", "LAW 2650",
-    "PSYCH 2750", "HD 2600",
-    "PSYCH 2800", "HD 2810",
-    "PSYCH 2820",
-    "PSYCH 2940", "AEM 2020",
-    "PSYCH 3130", "COGST 3150", "HD 3150", "LING 3150",
-    "PSYCH 3135", "COGST 3135",
-    "PSYCH 3250", "PSYCH 3270", "PSYCH 3280",
-    "PSYCH 3450", "HD 3455",
-    "PSYCH 3800", "PSYCH 3850",
-    "PSYCH 4050", "PSYCH 4210", "HD 4210",
-    "PSYCH 4300", "PSYCH 4560", "HD 4560", "ASRC 4561", "FGSS 4561",
-    "PSYCH 4580", "HD 4580", "ILRGL 4580", "SOC 4580",
-    "PSYCH 4670", "HD 4670", "PSYCH 4790",
-    "PSYCH 4810", "PSYCH 4820", "PSYCH 4840", "PSYCH 4850", "PSYCH 4910",
-    "PSYCH 4940", "COGST 4940", "HD 4940", "PHIL 3915",
-})
+_PSYCH_RESEARCH = frozenset({"PSYCH 4700", "PSYCH 4710"})
 
 
 # ---------------------------------------------------------------------------
@@ -492,32 +482,138 @@ def _is_concentration_categories(
     return (
         MinorCategoryDef(
             id="is_core",
-            label="IS Core Foundation (1 course)",
+            label="IS Core Foundation (1 req)",
             short_label="Core",
-            required_summary="1 course (3-4 cr)",
-            rule_summary="Foundational Info Sci core (INFO 1200, 1260, 1300, 2040, 2450, 2950, or 2951); letter grade C or better.",
+            required_summary="1 course",
+            rule_summary=(
+                "Foundational Info Sci core (INFO 1200, 1260, 1300, 2040, 2450, 2950, or 2951); "
+                "additional Core courses also count as Electives (no double-counting)."
+            ),
             tone="sky",
             courses=_IS_CORE_ALL,
+            required_count=1,
         ),
         MinorCategoryDef(
             id=f"is_conc_{conc_id}",
-            label=f"Concentration: {conc_label} (3 courses)",
+            label=f"Concentration: {conc_label}",
             short_label=conc_short,
             required_summary="3 courses",
             rule_summary=f"Approved {conc_label} concentration courses (letter grade C or higher at Cornell).",
             tone=tone,
             courses=conc_courses,
+            required_count=3,
         ),
         MinorCategoryDef(
             id="is_elective",
-            label="IS / Concentration Electives (1-2 courses)",
+            label="IS Electives",
             short_label="Elective",
-            required_summary="1-2 courses",
-            rule_summary="Additional INFO or approved concentration courses (1 elective for Engineering; 2 electives for A&S/CALS).",
+            required_summary="2 courses",
+            rule_summary=(
+                "Additional approved concentration courses, extra Core courses (incl. INFO 1200/1260/1300), "
+                "or 2000+ INFO courses (no double-counting)."
+            ),
             tone="amber",
             courses=_IS_ALL_CONCENTRATION_COURSES | _IS_CORE_ALL,
             dynamic_rule="infosci_elective",
+            required_count=2,
         ),
+    )
+
+
+def resolve_is_version_for_college(
+    version: MinorVersionDef,
+    college_id: str = "",
+) -> tuple[MinorVersionDef, str]:
+    """Adapt an Info Science MinorVersionDef cleanly to A&S/CALS, Engineering, or Nolan Hotel rules."""
+    col = str(college_id or "").strip().lower()
+    if col not in _IS_COLLEGES_BY_ID:
+        col = "as_cals"
+
+    is_eng = col == "engineering"
+    is_hotel = col == "hotel"
+    conc_req = 2 if is_hotel else 3
+    elec_req = 1 if (is_eng or is_hotel) else 2
+    elec_courses = (
+        (_IS_ALL_CONCENTRATION_COURSES | _IS_CORE_ALL | _IS_HOTEL_EXTRA_ELECTIVES) - _IS_HOTEL_REQUIRED
+        if is_hotel
+        else _IS_ALL_CONCENTRATION_COURSES | _IS_CORE_ALL
+    )
+
+    adapted: list[MinorCategoryDef] = []
+    for cat in version.categories:
+        if cat.id == "is_core":
+            adapted.append(cat)
+            if is_hotel:
+                adapted.append(
+                    MinorCategoryDef(
+                        id="is_hotel_req",
+                        label="Nolan Required (HADM 3740 & 4760)",
+                        short_label="HADM Req",
+                        required_summary="2 required",
+                        rule_summary="Both HADM 3740 (Database Mgmt) and HADM 4760 (VBA Programming) are required for Nolan students.",
+                        tone="indigo",
+                        courses=_IS_HOTEL_REQUIRED,
+                        required_count=2,
+                    )
+                )
+        elif cat.id.startswith("is_conc_"):
+            adapted.append(
+                MinorCategoryDef(
+                    id=cat.id,
+                    label=cat.label,
+                    short_label=cat.short_label,
+                    required_summary=f"{conc_req} courses",
+                    rule_summary=cat.rule_summary,
+                    tone=cat.tone,
+                    courses=cat.courses,
+                    wildcard_courses=cat.wildcard_courses,
+                    dynamic_rule=cat.dynamic_rule,
+                    required_count=conc_req,
+                )
+            )
+        elif cat.id == "is_elective":
+            elec_rule = (
+                "1 additional concentration/Core course, INFO 1300, AEM 3220, or 2000+ INFO (no double-counting)."
+                if is_hotel
+                else f"{elec_req} additional concentration course{'s' if elec_req > 1 else ''}, extra Core course (incl. INFO 1200/1260/1300), or 2000+ INFO (no double-counting)."
+            )
+            adapted.append(
+                MinorCategoryDef(
+                    id="is_elective",
+                    label=f"IS Elective{'s' if elec_req > 1 else ''} ({elec_req} req)",
+                    short_label="Elective",
+                    required_summary=f"{elec_req} course{'s' if elec_req > 1 else ''}",
+                    rule_summary=elec_rule,
+                    tone=cat.tone,
+                    courses=elec_courses,
+                    dynamic_rule="infosci_elective_hotel" if is_hotel else "infosci_elective",
+                    required_count=elec_req,
+                )
+            )
+        else:
+            adapted.append(cat)
+
+    col_def = _IS_COLLEGES_BY_ID[col]
+    ds_note = (
+        " Important: Cannot pair Data Science concentration with the standalone Data Science Minor."
+        if version.id == "data_science"
+        else ""
+    )
+    total_summary = (
+        f"{col_def.total_required_summary} (No DS Minor)"
+        if version.id == "data_science"
+        else col_def.total_required_summary
+    )
+    return (
+        MinorVersionDef(
+            id=version.id,
+            label=version.label,
+            short_label=version.short_label,
+            description=f"{col_def.note}{ds_note}",
+            total_required_summary=total_summary,
+            categories=tuple(adapted),
+        ),
+        col,
     )
 
 
@@ -551,6 +647,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         tone="sky",
                         courses=_LS_CAT1_LEGAL_INSTITUTIONS,
                         wildcard_courses=_LS_WILDCARD,
+                        required_count=2,
                     ),
                     MinorCategoryDef(
                         id="law_policy",
@@ -561,6 +658,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         tone="emerald",
                         courses=_LS_CAT2_LAW_POLICY,
                         wildcard_courses=_LS_WILDCARD,
+                        required_count=2,
                     ),
                     MinorCategoryDef(
                         id="law_social_structure",
@@ -571,6 +669,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         tone="violet",
                         courses=_LS_CAT3_LAW_SOCIAL_STRUCTURE,
                         wildcard_courses=_LS_WILDCARD,
+                        required_count=2,
                     ),
                     MinorCategoryDef(
                         id="law_culture",
@@ -581,6 +680,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         tone="amber",
                         courses=_LS_CAT4_LAW_CULTURE,
                         wildcard_courses=_LS_WILDCARD,
+                        required_count=2,
                     ),
                     MinorCategoryDef(
                         id="law_ethics",
@@ -591,6 +691,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         tone="rose",
                         courses=_LS_CAT5_LAW_ETHICS,
                         wildcard_courses=_LS_WILDCARD,
+                        required_count=2,
                     ),
                 ),
             ),
@@ -792,6 +893,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Any 3000+ letter-grade SC Johnson (AEM/HADM/NBA/NCC) course (excluding IND/RSC/capstone/AEM 3100 for ORIE).",
                         tone="violet",
                         dynamic_rule="bme_career_goals",
+                        required_credits=3.0,
                     ),
                 ),
             ),
@@ -850,6 +952,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Approved Entrepreneurship, Life Sci/Healthcare Business, Mgmt/Fin, or Spreadsheet/Strategy courses.",
                         tone="violet",
                         courses=_BUS_DBMLS_CAREER,
+                        required_credits=3.0,
                     ),
                     MinorCategoryDef(
                         id="dbmls_capstone",
@@ -908,6 +1011,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Approved FA26/SP27 Inequality electives across departments (>=2 at 3000+ level, >=3 depts total).",
                         tone="violet",
                         courses=_INEQ_ALL_ELECTIVES,
+                        required_count=4,
                     ),
                 ),
             ),
@@ -929,6 +1033,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="SOC 2208 / AMST 2208 / PUBPOL 2208.",
                         tone="sky",
                         courses=_INEQ_CORE,
+                        required_count=1,
                     ),
                     MinorCategoryDef(
                         id="ineq_overview",
@@ -938,6 +1043,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Broad survey course (extra Overview counts as an Elective).",
                         tone="emerald",
                         courses=_INEQ_OVERVIEW,
+                        required_count=1,
                     ),
                     MinorCategoryDef(
                         id="ineq_het_elective",
@@ -947,6 +1053,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Courses with official Center for the Study of Inequality HET designation.",
                         tone="rose",
                         courses=_INEQ_HET_ELECTIVES,
+                        required_count=2,
                     ),
                     MinorCategoryDef(
                         id="ineq_elective",
@@ -956,6 +1063,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Any approved non-HET or additional HET Inequality elective.",
                         tone="violet",
                         courses=_INEQ_REG_ELECTIVES,
+                        required_count=2,
                     ),
                 ),
             ),
@@ -987,6 +1095,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Any ILRGL (or ILRGL-crosslisted) undergraduate course taken for a letter grade, excluding independent study/internships/honors.",
                         tone="teal",
                         dynamic_rule="lsj_ilrgl",
+                        required_credits=15.0,
                     ),
                 ),
             ),
@@ -1019,6 +1128,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Any 2000-4999 HIST seminar (SEM component, >=3 cr, letter grade; excludes FWS, independent study & honors).",
                         tone="amber",
                         dynamic_rule="history_seminar_2000",
+                        required_count=1,
                     ),
                     MinorCategoryDef(
                         id="hist_course",
@@ -1028,6 +1138,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Any 1000-4999 HIST lecture or seminar >=3 cr for letter grade (excludes FWS, HIST 2001/3002/4001/4002/8004).",
                         tone="sky",
                         dynamic_rule="history_non_fws",
+                        required_count=4,
                     ),
                 ),
             ),
@@ -1039,27 +1150,29 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
         short_label="Info Science",
         department="Bowers CIS — Information Science",
         default_version="all",
-        overview="1 Core + 3 Concentration courses + 1-2 Electives (5 courses for Engineering; 6 courses for A&S/CALS), letter grade C or higher.",
+        default_college="as_cals",
+        colleges=INFO_SCIENCE_COLLEGES,
+        overview="5-6 Cornell letter-grade courses (C or higher), tailored by college: A&S/CALS (6), Engineering (5), or Nolan Hotel (6). Extra Core courses count as Electives; no double-counting inside the minor.",
         versions=(
             MinorVersionDef(
                 id="all",
                 label="All Concentrations (Compare Tracks)",
                 short_label="All Tracks",
                 description=(
-                    "Shows Info Sci Core courses plus all 7 concentrations so you can explore across tracks. "
-                    "A&S/CALS/other colleges require 6 courses (1 Core + 3 in one Concentration + 2 Electives); "
-                    "Engineering requires 5 courses (1 Core + 3 Conc + 1 Elective). Open to non-IS/ISST majors; grade C+ required."
+                    "Shows Info Sci Core, all 7 concentrations, and Electives. Requirements adapt to your college; "
+                    "no course may count more than once within the minor."
                 ),
-                total_required_summary="5-6 courses (1 Core + 3 Conc + 1-2 Elec)",
+                total_required_summary="6 courses (1 Core + 3 Conc + 2 Elec)",
                 categories=(
                     MinorCategoryDef(
                         id="is_core",
-                        label="Core Foundation (1 req)",
+                        label="IS Core Foundation (1 req)",
                         short_label="IS Core",
                         required_summary="1 course",
-                        rule_summary="INFO 1200, 1260, 1300, 2040, 2450, 2950, or 2951 (and crosslists).",
+                        rule_summary="INFO 1200, 1260, 1300, 2040, 2450, 2950, or 2951 (extra Core courses count as Electives).",
                         tone="sky",
                         courses=_IS_CORE_ALL,
+                        required_count=1,
                     ),
                     MinorCategoryDef(
                         id="is_conc_behavioral_science",
@@ -1069,6 +1182,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Human interaction, social computing, & behavioral analytics.",
                         tone="emerald",
                         courses=_IS_BEHAVIORAL,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_data_science",
@@ -1078,6 +1192,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Data analytics, visualization, & ML (cannot double with Data Science Minor).",
                         tone="violet",
                         courses=_IS_DATA_SCIENCE,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_digital_culture",
@@ -1087,6 +1202,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Cultural analytics, media history, & digital creation.",
                         tone="amber",
                         courses=_IS_DIGITAL_CULTURE,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_ethics_law_policy",
@@ -1096,6 +1212,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Privacy, AI governance, IP law, fairness, & tech policy.",
                         tone="rose",
                         courses=_IS_ETHICS_LAW,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_interactive_tech",
@@ -1105,6 +1222,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Web systems, prototyping, games, HCI engineering & physical computing.",
                         tone="teal",
                         courses=_IS_INTERACTIVE_TECH,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_networks_crowds_markets",
@@ -1114,6 +1232,7 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Network modeling, game theory, market design, & empirical analysis.",
                         tone="indigo",
                         courses=_IS_NETWORKS_MARKETS,
+                        required_count=3,
                     ),
                     MinorCategoryDef(
                         id="is_conc_ux",
@@ -1123,6 +1242,18 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         rule_summary="Human-centered design, user research, & HCI studio prototyping.",
                         tone="emerald",
                         courses=_IS_UX,
+                        required_count=3,
+                    ),
+                    MinorCategoryDef(
+                        id="is_elective",
+                        label="IS Electives",
+                        short_label="Elective",
+                        required_summary="2 courses",
+                        rule_summary="Additional approved concentration courses, extra Core courses, or 2000+ INFO (no double-counting).",
+                        tone="amber",
+                        courses=_IS_ALL_CONCENTRATION_COURSES | _IS_CORE_ALL,
+                        dynamic_rule="infosci_elective",
+                        required_count=2,
                     ),
                 ),
             ),
@@ -1225,63 +1356,38 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
         short_label="Psychology",
         department="Department of Psychology",
         default_version="standard",
-        overview="18 credits in PSYCH (C- or better, letter grade except PSYCH 4700/4710 up to 6 cr; no FWS or AP).",
+        overview="18 credits in PSYCH (C- or better, letter grade except PSYCH 4700/4710 up to 6 cr; no FWS or AP). Area breadth is recommended, not required.",
         versions=(
             MinorVersionDef(
                 id="standard",
                 label="Standard (18 Credits)",
                 short_label="Standard",
                 description=(
-                    "Open to all Cornell undergrads outside Psychology. Requires 18 credits in Psychology (grade C- or higher; "
-                    "all letter-grade except PSYCH 4700/4710 research up to 6 cr; no FWS or AP credits). "
-                    "Organized by Psychology's 4 official breadth areas + electives."
+                    "Open to all Cornell undergrads outside Psychology/HD. Requires 18 credits in PSYCH (grade C- or higher; "
+                    "letter-grade except PSYCH 4700/4710 research up to 6 cr; no FWS or AP credits). "
+                    "Taking courses across different subfields is recommended, not required."
                 ),
                 total_required_summary="18 credits (non-FWS PSYCH)",
                 categories=(
                     MinorCategoryDef(
-                        id="psych_cognition",
-                        label="Area: Perception & Cognition",
-                        short_label="Cognition",
-                        required_summary="Area course",
-                        rule_summary="Perception, language, memory, attention, & cognitive science.",
+                        id="psych_course",
+                        label="PSYCH Courses (18 credits)",
+                        short_label="PSYCH Course",
+                        required_summary="12-18 cr",
+                        rule_summary="Any non-FWS undergraduate PSYCH course (1000-4999, C- or better letter grade; AP & FWS excluded).",
                         tone="sky",
-                        courses=_PSYCH_COGNITION,
+                        dynamic_rule="psych_course",
+                        required_credits=18.0,
                     ),
                     MinorCategoryDef(
-                        id="psych_development",
-                        label="Area: Development",
-                        short_label="Development",
-                        required_summary="Area course",
-                        rule_summary="Infancy, childhood, adolescence, lifespan development, & developmental psychopathology.",
-                        tone="emerald",
-                        courses=_PSYCH_DEVELOPMENT,
-                    ),
-                    MinorCategoryDef(
-                        id="psych_neuro",
-                        label="Area: Cognitive & Behavioral Neuroscience",
-                        short_label="Neuroscience",
-                        required_summary="Area course",
-                        rule_summary="Brain mechanisms, behavioral/computational neuroscience, & neurochemistry.",
-                        tone="violet",
-                        courses=_PSYCH_NEURO,
-                    ),
-                    MinorCategoryDef(
-                        id="psych_social",
-                        label="Area: Social & Personality",
-                        short_label="Social/Pers.",
-                        required_summary="Area course",
-                        rule_summary="Social psychology, personality, moral psychology, law, & clinical psychopathology.",
-                        tone="rose",
-                        courses=_PSYCH_SOCIAL,
-                    ),
-                    MinorCategoryDef(
-                        id="psych_elective",
-                        label="General PSYCH & Research (4700/4710)",
-                        short_label="PSYCH Elective",
-                        required_summary="Remaining cr",
-                        rule_summary="Intro PSYCH 1101, PSYCH 2500 Stats, 2830 Methods, 4700/4710 Research (<=6 cr), and other non-FWS UG PSYCH.",
+                        id="psych_research",
+                        label="Optional Research / Fieldwork (4700/4710)",
+                        short_label="Research <=6 cr",
+                        required_summary="Up to 6 cr",
+                        rule_summary="Optional supervised research or fieldwork (PSYCH 4700, 4710); max 6 credits count toward 18 cr (S/U allowed).",
                         tone="amber",
-                        dynamic_rule="psych_elective",
+                        courses=_PSYCH_RESEARCH,
+                        required_credits=6.0,
                     ),
                 ),
             ),

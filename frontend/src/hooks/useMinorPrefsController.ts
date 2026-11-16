@@ -23,6 +23,7 @@ export function resolveUserMinorPrefs(u: User): MinorPrefs {
   return {
     selected_minor: mp?.selected_minor || "",
     versions: { ...(mp?.versions || {}) },
+    colleges: { ...(mp?.colleges || {}) },
     completed_categories: { ...(mp?.completed_categories || {}) },
     hide_completed: mp?.hide_completed ?? true,
   };
@@ -116,6 +117,27 @@ export function useMinorPrefsController({
       void executeSearch({
         minor: mId,
         minorVersion: versionId,
+        minorCategories: [],
+        minorCompleted: nextPrefs.completed_categories[mId] || [],
+        minorHideCompleted: nextPrefs.hide_completed,
+      });
+    },
+    [minorPrefs, setMinorCategories, persistMinorPrefs, executeSearch]
+  );
+
+  const handleSelectMinorCollege = useCallback(
+    (collegeId: string) => {
+      const mId = minorPrefs.selected_minor;
+      if (!mId) return;
+      setMinorCategories([]);
+      const nextPrefs: MinorPrefs = {
+        ...minorPrefs,
+        colleges: { ...(minorPrefs.colleges || {}), [mId]: collegeId },
+      };
+      void persistMinorPrefs(nextPrefs);
+      void executeSearch({
+        minor: mId,
+        minorCollege: collegeId,
         minorCategories: [],
         minorCompleted: nextPrefs.completed_categories[mId] || [],
         minorHideCompleted: nextPrefs.hide_completed,
@@ -220,6 +242,7 @@ export function useMinorPrefsController({
     savingMinorPrefs,
     handleSelectMinor,
     handleSelectMinorVersion,
+    handleSelectMinorCollege,
     handleToggleMinorFilterCategory,
     handleClearMinorFilterCategories,
     handleToggleMinorCompletedCategory,

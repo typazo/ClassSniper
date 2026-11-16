@@ -23,12 +23,14 @@ interface Props {
   loadingCatalog: boolean;
   selectedMinor: string;
   selectedVersion: string;
+  selectedCollege?: string;
   selectedCategories: string[];
   completedCategories: string[];
   hideCompleted: boolean;
   savingPrefs?: boolean;
   onSelectMinor: (minorId: string) => void;
   onSelectVersion: (versionId: string) => void;
+  onSelectCollege?: (collegeId: string) => void;
   onToggleFilterCategory: (catId: string) => void;
   onClearFilterCategories: () => void;
   onToggleCompletedCategory: (catId: string) => void;
@@ -42,12 +44,14 @@ export function MinorFilterPanel({
   loadingCatalog,
   selectedMinor,
   selectedVersion,
+  selectedCollege = "",
   selectedCategories,
   completedCategories,
   hideCompleted,
   savingPrefs = false,
   onSelectMinor,
   onSelectVersion,
+  onSelectCollege,
   onToggleFilterCategory,
   onClearFilterCategories,
   onToggleCompletedCategory,
@@ -56,11 +60,18 @@ export function MinorFilterPanel({
   onClearCompleted,
 }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
+  const [expandedMatchedCats, setExpandedMatchedCats] = useState<Record<string, boolean>>({});
 
   const activeMinor = useMemo(
     () => minors.find((m) => m.id === selectedMinor) || null,
     [minors, selectedMinor]
   );
+
+  const activeCollege = useMemo(() => {
+    if (!activeMinor?.colleges?.length) return null;
+    const target = selectedCollege || activeMinor.active_college || activeMinor.default_college || "";
+    return activeMinor.colleges.find((c) => c.id === target) || activeMinor.colleges[0] || null;
+  }, [activeMinor, selectedCollege]);
 
   const activeVersion = useMemo(() => {
     if (!activeMinor) return null;
@@ -78,7 +89,7 @@ export function MinorFilterPanel({
   const autoMatchedCategoryIds = useMemo(() => {
     if (!activeVersion) return [];
     return activeVersion.categories
-      .filter((c) => c.matched_user_courses.length > 0)
+      .filter((c) => (c.auto_complete !== undefined ? c.auto_complete : c.matched_user_courses.length > 0))
       .map((c) => c.id);
   }, [activeVersion]);
 
@@ -285,9 +296,41 @@ export function MinorFilterPanel({
         </div>
       )}
 
-      {/* Active Version Summary + Category Checklist Cards */}
+      {/* Active Version Summary + College Variant Selector + Category Cards */}
       {activeMinor && activeVersion ? (
         <div className="space-y-2">
+          {activeMinor.colleges && activeMinor.colleges.length > 0 && onSelectCollege && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px]">
+              <span className="font-medium text-zinc-400">Your College:</span>
+              <div className="flex flex-wrap items-center gap-1">
+                {activeMinor.colleges.map((col) => {
+                  const active = activeCollege?.id === col.id;
+                  return (
+                    <button
+                      key={col.id}
+                      type="button"
+                      title={col.note}
+                      aria-pressed={active}
+                      onClick={() => onSelectCollege(col.id)}
+                      className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition ${
+                        active
+                          ? "border-amber-400 bg-amber-500/20 text-amber-100"
+                          : "border-zinc-700/80 bg-zinc-950 text-zinc-300 hover:border-amber-500/40"
+                      }`}
+                    >
+                      {col.short_label}
+                    </button>
+                  );
+                })}
+              </div>
+              {activeCollege && (
+                <span className="text-[10px] text-zinc-500">
+                  No double-counting within minor · Extra Core counts as Elective
+                </span>
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-medium text-zinc-200">
@@ -313,10 +356,29 @@ export function MinorFilterPanel({
             </span>
           </div>
 
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div
+            className={`grid grid-cols-1 gap-2 ${
+              activeVersion.categories.length === 1
+                ? ""
+                : activeVersion.categories.length === 2
+                  ? "sm:grid-cols-2"
+                  : "sm:grid-cols-2 lg:grid-cols-3"
+            }`}
+          >
             {activeVersion.categories.map((cat) => {
               const isDone = completedSet.has(cat.id);
               const isFocused = filterSet.has(cat.id);
+              const isExpanded = Boolean(expandedMatchedCats[cat.id]);
+              const visibleCourses = isExpanded
+                ? cat.matched_user_courses
+                : cat.matched_user_courses.slice(0, 3);
+              const hiddenCount = Math.max(0, cat.matched_user_courses.length - 3);
+              const matchedHeading =
+                cat.required_credits != null
+                  ? `Earned ${cat.earned_credits ?? 0}/${cat.required_credits} cr:`
+                  : cat.required_count != null
+                    ? `Assigned (${cat.matched_user_courses.length}/${cat.required_count}):`
+                    : "Matched:";
               return (
                 <div
                   key={cat.id}
@@ -390,19 +452,41 @@ export function MinorFilterPanel({
 
                   {cat.matched_user_courses.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1 pt-0.5 text-[10px]">
-                      <span className="text-sky-300">Matched:</span>
-                      {cat.matched_user_courses.slice(0, 3).map((code) => (
-                        <span
-                          key={code}
-                          className="rounded border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 font-medium text-sky-200"
+                      <span className={cat.auto_complete === false ? "text-amber-300" : "text-sky-300"}>
+                        {matchedHeading}
+                      </span>
+                      {visibleCourses.map((code) => {
+                        const isIp = code.endsWith(" (IP)");
+                        return (
+                          <span
+                            key={code}
+                            title={isIp ? "Currently in progress" : "Completed course"}
+                            className={`rounded border px-1.5 py-0.5 font-medium ${
+                              isIp
+                                ? "border-dashed border-sky-400/50 bg-sky-500/10 text-sky-200"
+                                : cat.auto_complete === false
+                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                                  : "border-sky-500/40 bg-sky-500/15 text-sky-200"
+                            }`}
+                          >
+                            {code}
+                          </span>
+                        );
+                      })}
+                      {hiddenCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedMatchedCats((prev) => ({
+                              ...prev,
+                              [cat.id]: !prev[cat.id],
+                            }))
+                          }
+                          title={cat.matched_user_courses.join(", ")}
+                          className="rounded px-1 py-0.5 text-zinc-300 underline decoration-zinc-500 underline-offset-2 hover:bg-zinc-800 hover:text-white"
                         >
-                          {code}
-                        </span>
-                      ))}
-                      {cat.matched_user_courses.length > 3 && (
-                        <span className="text-zinc-400">
-                          +{cat.matched_user_courses.length - 3} more
-                        </span>
+                          {isExpanded ? "Show less" : `+${hiddenCount} more`}
+                        </button>
                       )}
                     </div>
                   )}

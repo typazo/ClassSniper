@@ -44,6 +44,7 @@ export interface SearchOverride {
   attrMatch?: AttrMatchMode;
   minor?: string;
   minorVersion?: string;
+  minorCollege?: string;
   minorCategories?: string[];
   minorCompleted?: string[];
   minorHideCompleted?: boolean;
@@ -193,12 +194,14 @@ export function useCatalogSearch({
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load rosters"));
   }, []);
 
+  const infoSciCollege = minorPrefs.colleges?.info_science || "";
+
   useEffect(() => {
     if (!selectedRoster) return;
     let cancelled = false;
     setLoadingMinorsCatalog(true);
     api
-      .getMinorsCatalog(selectedRoster)
+      .getMinorsCatalog(selectedRoster, infoSciCollege || undefined)
       .then((res) => {
         if (!cancelled) setMinorsCatalog(res.minors);
       })
@@ -209,7 +212,7 @@ export function useCatalogSearch({
     return () => {
       cancelled = true;
     };
-  }, [selectedRoster, user.completed_courses, user.in_progress_courses]);
+  }, [selectedRoster, infoSciCollege, user.completed_courses, user.in_progress_courses]);
 
   const loadIlrSummary = useCallback(async (roster: string, ithVirt: boolean, syncPriority = false) => {
     if (!roster) return;
@@ -413,6 +416,12 @@ export function useCatalogSearch({
           : effMinor
             ? st.minorPrefs.versions[effMinor] || ""
             : "";
+      const effMinorCollege =
+        override?.minorCollege !== undefined
+          ? override.minorCollege
+          : effMinor
+            ? st.minorPrefs.colleges?.[effMinor] || ""
+            : "";
       const effMinorCategories = override?.minorCategories ?? st.minorCategories;
       const effMinorCompleted =
         override?.minorCompleted !== undefined
@@ -487,6 +496,7 @@ export function useCatalogSearch({
           attr_match: effAttrMatch,
           minor: effMinor || undefined,
           minor_version: effMinorVersion || undefined,
+          minor_college: effMinor && effMinorCollege ? effMinorCollege : undefined,
           minor_categories: effMinor ? effMinorCategories : undefined,
           minor_completed: effMinor ? effMinorCompleted : undefined,
           minor_hide_completed: effMinor ? effMinorHideCompleted : undefined,

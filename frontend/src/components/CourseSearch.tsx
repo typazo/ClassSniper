@@ -324,6 +324,7 @@ export function CourseSearch({
         onToggleMinorExpanded={() => setMinorExpanded((v) => !v)}
         onSelectMinor={minorCtrl.handleSelectMinor}
         onSelectMinorVersion={minorCtrl.handleSelectMinorVersion}
+        onSelectMinorCollege={minorCtrl.handleSelectMinorCollege}
         onToggleMinorFilterCategory={minorCtrl.handleToggleMinorFilterCategory}
         onClearMinorFilterCategories={minorCtrl.handleClearMinorFilterCategories}
         onToggleMinorCompletedCategory={minorCtrl.handleToggleMinorCompletedCategory}

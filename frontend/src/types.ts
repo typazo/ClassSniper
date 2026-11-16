@@ -184,8 +184,17 @@ export interface CourseIlrEligibility {
 export interface MinorPrefs {
   selected_minor: string;
   versions: Record<string, string>;
+  colleges?: Record<string, string>;
   completed_categories: Record<string, string[]>;
   hide_completed: boolean;
+}
+
+export interface MinorCollegeCatalog {
+  id: string;
+  label: string;
+  short_label: string;
+  total_required_summary: string;
+  note: string;
 }
 
 export interface MinorCategoryCatalog {
@@ -195,6 +204,11 @@ export interface MinorCategoryCatalog {
   required_summary: string;
   rule_summary: string;
   tone: string;
+  required_count?: number | null;
+  required_credits?: number | null;
+  earned_credits?: number;
+  in_progress_credits?: number;
+  auto_complete?: boolean;
   roster_count: number;
   matched_user_courses: string[];
 }
@@ -215,6 +229,9 @@ export interface MinorCatalogItem {
   short_label: string;
   department: string;
   default_version: string;
+  default_college?: string;
+  active_college?: string;
+  colleges?: MinorCollegeCatalog[];
   overview: string;
   versions: MinorVersionCatalog[];
 }

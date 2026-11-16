@@ -110,6 +110,7 @@ interface Props {
   onToggleMinorExpanded: () => void;
   onSelectMinor: (minorId: string) => void;
   onSelectMinorVersion: (verId: string) => void;
+  onSelectMinorCollege: (collegeId: string) => void;
   onToggleMinorFilterCategory: (catId: string) => void;
   onClearMinorFilterCategories: () => void;
   onToggleMinorCompletedCategory: (catId: string) => void;
@@ -626,6 +627,9 @@ export function SearchFilterHeader(props: Props) {
           loadingCatalog={loadingMinorsCatalog}
           selectedMinor={minorPrefs.selected_minor}
           selectedVersion={minorPrefs.selected_minor ? minorPrefs.versions[minorPrefs.selected_minor] || "" : ""}
+          selectedCollege={
+            minorPrefs.selected_minor ? minorPrefs.colleges?.[minorPrefs.selected_minor] || "" : ""
+          }
           selectedCategories={minorCategories}
           completedCategories={
             minorPrefs.selected_minor ? minorPrefs.completed_categories[minorPrefs.selected_minor] || [] : []
@@ -634,6 +638,7 @@ export function SearchFilterHeader(props: Props) {
           savingPrefs={savingMinorPrefs}
           onSelectMinor={props.onSelectMinor}
           onSelectVersion={props.onSelectMinorVersion}
+          onSelectCollege={props.onSelectMinorCollege}
           onToggleFilterCategory={props.onToggleMinorFilterCategory}
           onClearFilterCategories={props.onClearMinorFilterCategories}
           onToggleCompletedCategory={props.onToggleMinorCompletedCategory}

@@ -278,9 +278,9 @@ def test_info_science_and_psychology_requirements() -> None:
     assert hotel_assign.get("is_hotel_req") == ["HADM 3740"]
     assert hotel_assign.get("is_elective") == ["AEM 3220"]
 
-    # Psychology minor has ONLY requirement categories (psych_course + psych_research), not unrequired area tracks
+    # Psychology minor has a single requirement category (psych_course: 18 credits total)
     psych_def = MINORS_BY_ID["psychology"]
-    assert [c.id for c in psych_def.versions[0].categories] == ["psych_course", "psych_research"]
+    assert [c.id for c in psych_def.versions[0].categories] == ["psych_course"]
 
     psych_cog = {"subject": "PSYCH", "catalog_nbr": "3140", "components": ["LEC"], "has_letter_grade": True, "units_max": 3.0}
     psych_res = {"subject": "PSYCH", "catalog_nbr": "4700", "components": ["IND"], "has_letter_grade": False, "units_max": 3.0}
@@ -293,7 +293,7 @@ def test_info_science_and_psychology_requirements() -> None:
 
     ev_res = evaluate_course_for_minor(psych_res, "psychology", "standard")
     assert ev_res is not None
-    assert ev_res["matched_categories"] == ["psych_research"]
+    assert ev_res["matched_categories"] == ["psych_course"]
     assert any("6 credits" in w for w in ev_res["warnings"])
     assert evaluate_course_for_minor(psych_fws, "psychology", "standard") is None
 
@@ -320,8 +320,7 @@ def test_minor_prefs_normalization_and_autofill() -> None:
         completed_courses=["PSYCH 3140"],
         in_progress_courses=["PSYCH 4700"],
     )
-    assert suggestions["psych_course"] == ["PSYCH 3140"]
-    assert suggestions["psych_research"] == ["PSYCH 4700 (IP)"]
+    assert suggestions["psych_course"] == ["PSYCH 3140", "PSYCH 4700 (IP)"]
 
     # AP Psych 1101 must NOT count toward psych_course; 6 completed credits + 1 IP must NOT auto-complete 18 cr
     cat_6cr = build_minors_catalog(
@@ -352,7 +351,7 @@ def test_minor_prefs_normalization_and_autofill() -> None:
     assert ev_ap["already_taken"] is False
     assert any("AP credit" in w for w in ev_ap["warnings"])
 
-    # Research S/U credit counts up to 6 cr toward 18-credit PSYCH total, while research itself requires >= 6 cr
+    # Research S/U credit counts up to 6 cr toward 18-credit PSYCH total inside psych_course
     cat_18cr = build_minors_catalog(
         [],
         completed_courses=["PSYCH 2450", "PSYCH 3420", "PSYCH 3140", "PSYCH 3800", "PSYCH 4320", "PSYCH 4700"],
@@ -368,8 +367,7 @@ def test_minor_prefs_normalization_and_autofill() -> None:
     psy_18 = {c["id"]: c for c in next(m for m in cat_18cr if m["id"] == "psychology")["versions"][0]["categories"]}
     assert psy_18["psych_course"]["earned_credits"] == 18.0
     assert psy_18["psych_course"]["auto_complete"] is True
-    assert psy_18["psych_research"]["earned_credits"] == 3.0
-    assert psy_18["psych_research"]["auto_complete"] is False
+    assert list(psy_18.keys()) == ["psych_course"]
 
 
 @pytest.mark.asyncio
@@ -461,7 +459,7 @@ async def test_minors_catalog_preferences_and_search_api(tmp_path: Path) -> None
             status_res = await client.get("/api/auth/status")
             assert status_res.json()["user"]["minor_prefs"]["selected_minor"] == "psychology"
 
-            # 3. Search hides PSYCH 3140 (completed psych_course + already taken) while keeping PSYCH 4700 (research cap)
+            # 3. Search hides completed psych_course entries when hide_completed=True
             search_hidden = (
                 await client.get(
                     "/api/courses/search",
@@ -470,10 +468,10 @@ async def test_minors_catalog_preferences_and_search_api(tmp_path: Path) -> None
             ).json()
             codes_hidden = {f"{c['subject']} {c['catalog_nbr']}" for c in search_hidden["courses"]}
             assert "PSYCH 3140" not in codes_hidden
-            assert "PSYCH 4700" in codes_hidden
+            assert "PSYCH 4700" not in codes_hidden
             assert "PSYCH 1120" not in codes_hidden
 
-            # 4. With minor_hide_completed=false, PSYCH 3140 appears with badge completed=true
+            # 4. With minor_hide_completed=false, PSYCH 3140 appears with badge completed=true and PSYCH 4700 appears
             search_all = (
                 await client.get(
                     "/api/courses/search",
@@ -486,4 +484,5 @@ async def test_minors_catalog_preferences_and_search_api(tmp_path: Path) -> None
             ).json()
             by_code_all = {f"{c['subject']} {c['catalog_nbr']}": c for c in search_all["courses"]}
             assert "PSYCH 3140" in by_code_all
+            assert "PSYCH 4700" in by_code_all
             assert by_code_all["PSYCH 3140"]["minor_eligibility"]["badges"][0]["completed"] is True

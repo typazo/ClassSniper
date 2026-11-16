@@ -30,7 +30,8 @@ _LSJ_EXCLUDED_NBRS = frozenset(
 _HIST_EXCLUDED_NBRS = frozenset({"2001", "3002", "4001", "4002", "8004"})
 _INFOSCI_EXCLUDED_NBRS = frozenset({"1998", "4900", "4910", "4997", "4998"})
 _IS_HOTEL_REQUIRED_NBRS = frozenset({"HADM 3740", "HADM 4760"})
-_PSYCH_NON_MINOR_NBRS = frozenset({"1104", "2091", "2801", "4700", "4710", "4720", "4910"})
+_PSYCH_NON_MINOR_NBRS = frozenset({"1104", "2091", "2801", "4720", "4910"})
+_PSYCH_RESEARCH_CODES = frozenset({"PSYCH 4700", "PSYCH 4710"})
 
 _MINOR_WARNINGS: dict[str, dict[str, str]] = {
     "business": {
@@ -318,7 +319,11 @@ def _matches_dynamic_rule(
         return False
 
     if rule == "psych_course":
-        if fields["is_fws"] or fields["units_max"] < 1.0 or not fields["has_letter_grade"] or fields["is_only_ind_rsc"]:
+        if fields["is_fws"] or fields["units_max"] < 1.0:
+            return False
+        if fields["candidate_code_set"] & _PSYCH_RESEARCH_CODES:
+            return True
+        if not fields["has_letter_grade"] or fields["is_only_ind_rsc"]:
             return False
         for nbr, num in _subject_numbers(fields, {"PSYCH"}):
             if 1000 <= num < 5000 and nbr not in _PSYCH_NON_MINOR_NBRS:
@@ -415,7 +420,7 @@ def _is_transfer_detail(detail: Optional[dict[str, str]]) -> bool:
 def _is_course_credit_eligible(
     detail: Optional[dict[str, str]],
     minor_id: str,
-    cat_id: str,
+    code: str,
     is_in_progress: bool,
 ) -> bool:
     """Return False when transcript metadata marks AP, disallowed transfer, S/U, or too-low grade."""
@@ -434,7 +439,7 @@ def _is_course_credit_eligible(
     if gr_u in _DISQUALIFYING_GRADES:
         return False
     if gr_u in _SU_GRADES:
-        return cat_id == "psych_research"
+        return code in _PSYCH_RESEARCH_CODES
     if gr_u in _GRADE_POINTS:
         min_pts = _MIN_GRADE_BY_MINOR.get(minor_id, 1.7)
         return _GRADE_POINTS[gr_u] >= min_pts
@@ -741,11 +746,9 @@ def _collect_user_minor_entries(
                 fields["candidate_subjects"].add(s_alias)
                 fields["nbrs_by_subject"].setdefault(s_alias, set()).add(n_alias)
 
-        matched_cats = [
-            cat
-            for cat in _match_course_categories(fields, version)
-            if _is_course_credit_eligible(detail, minor.id, cat.id, is_in_progress=is_ip)
-        ]
+        if not _is_course_credit_eligible(detail, minor.id, code, is_in_progress=is_ip):
+            continue
+        matched_cats = _match_course_categories(fields, version)
         if matched_cats:
             per_course.append((display_label, matched_cats))
             credits_by_label[display_label] = (_resolve_course_credits(detail, row), is_ip)
@@ -762,13 +765,19 @@ def _collect_user_minor_entries(
     ip_credits: dict[str, float] = {}
     for cat_id, labels in suggestions.items():
         e_total = 0.0
+        research_e_total = 0.0
         ip_total = 0.0
         for lbl in labels:
             cr, is_ip = credits_by_label.get(lbl, (3.0, False))
+            base_code = lbl[:-5] if lbl.endswith(" (IP)") else lbl
             if is_ip:
                 ip_total += cr
+            elif minor.id == "psychology" and base_code in _PSYCH_RESEARCH_CODES:
+                research_e_total += cr
             else:
                 e_total += cr
+        if minor.id == "psychology" and cat_id == "psych_course":
+            e_total += min(6.0, research_e_total)
         earned_credits[cat_id] = round(e_total, 2)
         ip_credits[cat_id] = round(ip_total, 2)
 
@@ -855,12 +864,9 @@ def build_minors_catalog(
                 req_cr = cat.required_credits
                 earned_cr = earned_by_cat.get(cat.id, 0.0)
                 ip_cr = ip_by_cat.get(cat.id, 0.0)
-                effective_cr = earned_cr
-                if minor.id == "psychology" and cat.id == "psych_course":
-                    effective_cr = round(earned_cr + min(6.0, earned_by_cat.get("psych_research", 0.0)), 2)
 
                 if req_cr is not None:
-                    auto_done = effective_cr >= req_cr
+                    auto_done = earned_cr >= req_cr
                 elif req_n is not None:
                     auto_done = len(matched_user) >= req_n
                 else:
@@ -876,7 +882,7 @@ def build_minors_catalog(
                         "tone": cat.tone,
                         "required_count": req_n,
                         "required_credits": req_cr,
-                        "earned_credits": effective_cr if (minor.id == "psychology" and cat.id == "psych_course") else earned_cr,
+                        "earned_credits": earned_cr,
                         "in_progress_credits": ip_cr,
                         "auto_complete": auto_done,
                         "roster_count": cat_counts.get(cat.id, 0),

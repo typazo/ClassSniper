@@ -461,10 +461,8 @@ _IS_COLLEGES_BY_ID: dict[str, MinorCollegeDef] = {c.id: c for c in INFO_SCIENCE_
 # ---------------------------------------------------------------------------
 # 7. Psychology (psychology.cornell.edu/minor & catalog.cornell.edu)
 # ---------------------------------------------------------------------------
-# Psychology minor requires 18 PSYCH credits (up to 6 cr 4700/4710 Research;
-# no FWS or AP). Breadth across the 4 areas is recommended, not required.
-
-_PSYCH_RESEARCH = frozenset({"PSYCH 4700", "PSYCH 4710"})
+# Psychology minor requires 18 PSYCH credits (grade C- or higher, letter grade
+# except PSYCH 4700/4710 up to 6 cr; no FWS or AP). Area breadth is recommended, not required.
 
 
 # ---------------------------------------------------------------------------
@@ -1373,21 +1371,11 @@ MINORS_REGISTRY: tuple[MinorDef, ...] = (
                         id="psych_course",
                         label="PSYCH Courses (18 credits)",
                         short_label="PSYCH Course",
-                        required_summary="12-18 cr",
-                        rule_summary="Any non-FWS undergraduate PSYCH course (1000-4999, C- or better letter grade; AP & FWS excluded).",
+                        required_summary="18 credits",
+                        rule_summary="Any non-FWS undergraduate PSYCH course (1000-4999, C- or better letter grade; AP & FWS excluded; up to 6 cr PSYCH 4700/4710).",
                         tone="sky",
                         dynamic_rule="psych_course",
                         required_credits=18.0,
-                    ),
-                    MinorCategoryDef(
-                        id="psych_research",
-                        label="Optional Research / Fieldwork (4700/4710)",
-                        short_label="Research <=6 cr",
-                        required_summary="Up to 6 cr",
-                        rule_summary="Optional supervised research or fieldwork (PSYCH 4700, 4710); max 6 credits count toward 18 cr (S/U allowed).",
-                        tone="amber",
-                        courses=_PSYCH_RESEARCH,
-                        required_credits=6.0,
                     ),
                 ),
             ),

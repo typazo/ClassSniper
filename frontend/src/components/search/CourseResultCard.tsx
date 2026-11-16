@@ -112,56 +112,52 @@ export function CourseResultCard({
             {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </div>
           <div className="min-w-0 space-y-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-0.5 text-base font-bold text-white">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="text-base font-bold text-white">
                 {course.subject} {course.catalog_nbr}
               </span>
-              {creditsLabel && (
-                <span className="rounded-md border border-zinc-700/80 bg-zinc-950 px-1.5 py-0.5 text-[11px] font-medium text-zinc-300">
-                  {creditsLabel}
+              {(creditsLabel || course.sections.length > 0) && (
+                <span className="text-xs text-zinc-400">
+                  {[creditsLabel, `${course.sections.length} sec${course.sections.length === 1 ? "" : "s"}`]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </span>
               )}
-              <span className="text-xs text-zinc-500">
-                {course.sections.length} sec{course.sections.length === 1 ? "" : "s"}
-              </span>
 
               {course.status_is_stale ? (
-                <span className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/80 px-2 py-0.5 text-[11px] font-medium text-zinc-300">
+                <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
                   <Loader2 className="h-3 w-3 animate-spin text-emerald-400" />
-                  Loading live status...
+                  Checking...
                 </span>
               ) : (
-                <>
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium">
                   {statusSummary.open > 0 && (
-                    <span className="rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-300">
-                      {statusSummary.open} Open
-                    </span>
+                    <span className="text-emerald-400">{statusSummary.open} Open</span>
                   )}
                   {statusSummary.waitlist > 0 && (
-                    <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-300">
-                      {statusSummary.waitlist} Waitlist
-                    </span>
+                    <span className="text-amber-300">{statusSummary.waitlist} Waitlist</span>
                   )}
                   {statusSummary.closed > 0 && (
-                    <span className="rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[11px] font-medium text-rose-300">
-                      {statusSummary.closed} Closed
-                    </span>
+                    <span className="text-rose-400">{statusSummary.closed} Closed</span>
                   )}
-                  {course.drop_odds &&
-                    (statusSummary.closed > 0 || statusSummary.waitlist > 0 || course.drop_odds.flips_all > 0) && (
-                      <DropOddsBadge dropOdds={course.drop_odds} compact />
-                    )}
-                </>
+                </span>
               )}
+
+              {!course.status_is_stale &&
+                course.drop_odds &&
+                course.drop_odds.tier !== "untracked" &&
+                course.drop_odds.tier !== "none" &&
+                (statusSummary.closed > 0 || statusSummary.waitlist > 0 || course.drop_odds.flips_all > 0) && (
+                  <DropOddsBadge dropOdds={course.drop_odds} compact />
+                )}
 
               <CourseLocationTags sections={course.sections} />
               {(course.hidden_other_location_count ?? 0) > 0 && (
                 <span
-                  className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  className="text-[11px] text-zinc-500"
                   title={`Hidden section(s) at ${(course.hidden_other_locations || []).join(", ")}`}
                 >
-                  +{course.hidden_other_location_count}{" "}
-                  {(course.hidden_other_locations || []).join(", ") || "off-campus"} hidden
+                  +{course.hidden_other_location_count} off-campus hidden
                 </span>
               )}
 
@@ -230,14 +226,9 @@ export function CourseResultCard({
               })}
 
               {elig?.prereq_status === "met" && (
-                <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-                  <CheckCircle2 className="h-2.5 w-2.5" />
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400">
+                  <CheckCircle2 className="h-3 w-3" />
                   Prereqs Met
-                </span>
-              )}
-              {elig?.prereq_status === "none" && (
-                <span className="rounded-md border border-zinc-700/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
-                  No Prereqs
                 </span>
               )}
               {elig?.prereq_status === "unmet" && elig.missing_prereqs && (
@@ -247,9 +238,9 @@ export function CourseResultCard({
                 </span>
               )}
               {elig?.prereq_status === "prose" && (
-                <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
-                  <AlertTriangle className="h-2.5 w-2.5" />
-                  Check catalog text prereq
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-300">
+                  <AlertTriangle className="h-3 w-3" />
+                  Text prereq
                 </span>
               )}
             </div>

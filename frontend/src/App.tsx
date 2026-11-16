@@ -193,43 +193,61 @@ export default function App() {
     <div className="min-h-screen bg-zinc-950 pb-20 text-zinc-100 sm:pb-8">
       {/* Top Header */}
       <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 ring-1 ring-emerald-500/30">
-              <Crosshair className="h-5 w-5 text-emerald-400" />
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-2.5">
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15 ring-1 ring-emerald-500/30">
+              <Crosshair className="h-4 w-4 text-emerald-400" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold tracking-tight text-white">ClassSniper</span>
-                <span
-                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                    livePoller?.state === "polling"
-                      ? "bg-emerald-500/15 text-emerald-300"
-                      : livePoller?.state === "backoff"
-                        ? "bg-amber-500/15 text-amber-300"
-                        : "bg-zinc-800 text-zinc-400"
-                  }`}
-                >
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      livePoller?.state === "polling" ? "animate-pulse bg-emerald-400" : "bg-zinc-500"
-                    }`}
-                  />
-                  {livePoller?.state || "ready"}
-                </span>
-              </div>
-              <p className="text-[11px] text-zinc-500">
-                {user.username} ({user.role}) &middot; {activeCount} active watch{activeCount === 1 ? "" : "es"}
-              </p>
-            </div>
+            <span className="font-bold tracking-tight text-white">ClassSniper</span>
+            <span
+              title={`${user.username} (${user.role}) · ${activeCount} active watch${activeCount === 1 ? "" : "es"}`}
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                livePoller?.state === "polling"
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : livePoller?.state === "backoff"
+                    ? "bg-amber-500/15 text-amber-300"
+                    : "bg-zinc-800 text-zinc-400"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  livePoller?.state === "polling" ? "animate-pulse bg-emerald-400" : "bg-zinc-500"
+                }`}
+              />
+              {livePoller?.state || "ready"}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Desktop Single-Row Nav */}
+          <nav className="hidden items-center gap-1 overflow-x-auto sm:flex">
+            <NavBtn active={activeTab === "watches"} onClick={() => selectTab("watches")} icon={<Crosshair className="h-3.5 w-3.5" />} label={`Watches (${watches.length})`} />
+            <NavBtn active={activeTab === "search"} onClick={() => selectTab("search")} icon={<Search className="h-3.5 w-3.5" />} label="Search" />
+            {user.major_mode === "cs" && (
+              <NavBtn active={activeTab === "checklist"} onClick={() => selectTab("checklist")} icon={<GraduationCap className="h-3.5 w-3.5" />} label="CS Checklist" />
+            )}
+            <NavBtn active={activeTab === "scheduler"} onClick={() => selectTab("scheduler")} icon={<Calendar className="h-3.5 w-3.5" />} label="Scheduler" />
+            <NavBtn active={activeTab === "alerts"} onClick={() => selectTab("alerts")} icon={<Bell className="h-3.5 w-3.5" />} label="Alerts" />
+            <NavBtn
+              active={activeTab === "telemetry"}
+              onClick={() => {
+                selectTab("telemetry");
+                refreshMetrics();
+              }}
+              icon={<Activity className="h-3.5 w-3.5" />}
+              label="Telemetry"
+            />
+            {user.role === "admin" && (
+              <NavBtn active={activeTab === "admin"} onClick={() => selectTab("admin")} icon={<Settings className="h-3.5 w-3.5" />} label="Admin" />
+            )}
+          </nav>
+
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="hidden text-xs text-zinc-500 lg:inline">{user.username}</span>
             <button
               type="button"
               onClick={() => setSoundEnabled((s) => !s)}
               title={soundEnabled ? "Browser alert chime on" : "Browser alert chime muted"}
-              className="rounded-xl border border-zinc-800 p-2 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+              className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
             >
               {soundEnabled ? <Volume2 className="h-4 w-4 text-emerald-400" /> : <VolumeX className="h-4 w-4" />}
             </button>
@@ -239,36 +257,13 @@ export default function App() {
                 await api.logout();
                 setAuth({ ...auth, user: null });
               }}
-              title="Sign out"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
+              title={`Sign out (${user.username})`}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
             >
               <LogOut className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Sign Out</span>
+              <span className="hidden md:inline">Sign Out</span>
             </button>
           </div>
-        </div>
-
-        {/* Desktop Nav */}
-        <div className="mx-auto hidden max-w-5xl gap-1 px-4 pb-2 sm:flex">
-          <NavBtn active={activeTab === "watches"} onClick={() => selectTab("watches")} icon={<Crosshair className="h-4 w-4" />} label={`Watchlist (${watches.length})`} />
-          <NavBtn active={activeTab === "search"} onClick={() => selectTab("search")} icon={<Search className="h-4 w-4" />} label="Search Classes" />
-          {user.major_mode === "cs" && (
-            <NavBtn active={activeTab === "checklist"} onClick={() => selectTab("checklist")} icon={<GraduationCap className="h-4 w-4" />} label="CS Checklist" />
-          )}
-          <NavBtn active={activeTab === "scheduler"} onClick={() => selectTab("scheduler")} icon={<Calendar className="h-4 w-4" />} label="Scheduler" />
-          <NavBtn active={activeTab === "alerts"} onClick={() => selectTab("alerts")} icon={<Bell className="h-4 w-4" />} label="Alerts & Push" />
-          <NavBtn
-            active={activeTab === "telemetry"}
-            onClick={() => {
-              selectTab("telemetry");
-              refreshMetrics();
-            }}
-            icon={<Activity className="h-4 w-4" />}
-            label="Telemetry"
-          />
-          {user.role === "admin" && (
-            <NavBtn active={activeTab === "admin"} onClick={() => selectTab("admin")} icon={<Settings className="h-4 w-4" />} label="Admin" />
-          )}
         </div>
       </header>
 

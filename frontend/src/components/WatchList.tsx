@@ -6,7 +6,6 @@ import {
   ExternalLink,
   Layers,
   Loader2,
-  MapPin,
   Pause,
   Play,
   RefreshCw,
@@ -469,18 +468,22 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                     {w.roster}
                   </span>
                   <h3 className="text-base font-bold text-white">
-                    {w.subject} {w.catalog_nbr}
+                    <a
+                      href={rosterUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open in Cornell Class Roster"
+                      className="inline-flex items-center gap-1 hover:text-emerald-300"
+                    >
+                      {w.subject} {w.catalog_nbr}
+                      <ExternalLink className="h-3 w-3 text-zinc-500" />
+                    </a>
                   </h3>
                   {secInfo && <StatusBadge status={secInfo.open_status} />}
-                  <DropOddsBadge dropOdds={w.drop_odds} />
-                  {showScopedLocation ? (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
-                      <MapPin className="h-3 w-3" />
-                      Ithaca + Virtual
-                    </span>
-                  ) : (
-                    secInfo && <SectionLocationTags section={secInfo} />
+                  {w.drop_odds && w.drop_odds.tier !== "untracked" && w.drop_odds.tier !== "none" && (
+                    <DropOddsBadge dropOdds={w.drop_odds} />
                   )}
+                  {!showScopedLocation && secInfo && <SectionLocationTags section={secInfo} />}
                   {w.group_key && (
                     <span
                       title="Pick Any 1 Group: when 1 watch in this group alerts, the others auto-pause"
@@ -522,6 +525,7 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                   <span>
                     Alert on: {w.trigger_on === "open_or_waitlist" ? "Open or Waitlist" : "Open only"}
                   </span>
+                  {showScopedLocation && <span className="text-emerald-300/80">Ithaca + Virtual</span>}
                   {secInfo?.meetings_summary && <span>{secInfo.meetings_summary}</span>}
                 </div>
 
@@ -567,16 +571,6 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                     #{w.class_nbr}
                   </button>
                 )}
-
-                <a
-                  href={rosterUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-xl border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-zinc-500"
-                >
-                  Roster
-                  <ExternalLink className="h-3 w-3" />
-                </a>
                 {quickOpenCodes.length === 0 && (
                   <a
                     href="https://studentcenter.cornell.edu"
@@ -614,11 +608,9 @@ export function WatchList({ watches, highlightClassNbr, onRefresh, onJumpToSearc
                 >
                   <Activity className="h-3 w-3 text-sky-300" />
                   <span>
-                    {w.drop_odds && w.drop_odds.opened_7d > 0
-                      ? `Drop Odds · ${w.drop_odds.label}`
-                      : w.turnover_summary && w.turnover_summary.all > 0
-                        ? `Drop Odds (${w.turnover_summary.all})`
-                        : "Drop Odds"}
+                    {w.turnover_summary && w.turnover_summary.all > 0
+                      ? `History (${w.turnover_summary.all})`
+                      : "History"}
                   </span>
                 </button>
                 <button

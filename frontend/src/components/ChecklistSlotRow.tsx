@@ -111,33 +111,33 @@ export function ChecklistSlotRow({
                     — {slot.title}
                   </span>
                 )}
-                {isInProgress && (
-                  <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
-                    Currently Taking
-                    {slot.sem && slot.sem.toUpperCase() !== "TAKING" ? ` (${slot.sem})` : ""}
+                {(isWhatIf || isInProgress) && (
+                  <span
+                    className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${
+                      isInProgress
+                        ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                        : "border-sky-500/40 bg-sky-500/15 text-sky-200"
+                    }`}
+                  >
+                    {isInProgress
+                      ? `Taking${slot.sem && slot.sem.toUpperCase() !== "TAKING" ? ` (${slot.sem})` : ""}`
+                      : `What-If (${slot.sem})`}
                   </span>
                 )}
-                {isWhatIf && (
-                  <span className="rounded border border-sky-500/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-200">
-                    What-If ({slot.sem})
-                  </span>
-                )}
-                {slot.cr && (
-                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
-                    {slot.cr} cr
-                  </span>
-                )}
-                {!isWhatIf &&
-                  !isInProgress &&
-                  slot.sem &&
-                  slot.sem.toUpperCase() !== "DONE" && (
-                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-                      {slot.sem}
-                    </span>
-                  )}
-                {slot.gr && (
-                  <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
-                    {slot.gr}
+                {(slot.cr ||
+                  (!isWhatIf && !isInProgress && slot.sem && slot.sem.toUpperCase() !== "DONE") ||
+                  slot.gr) && (
+                  <span className="font-mono text-[11px] text-zinc-400">
+                    {[
+                      slot.cr ? `${slot.cr} cr` : "",
+                      !isWhatIf && !isInProgress && slot.sem && slot.sem.toUpperCase() !== "DONE"
+                        ? slot.sem
+                        : "",
+                      slot.gr || "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                    {slot.gr ? "" : ""}
                   </span>
                 )}
               </div>

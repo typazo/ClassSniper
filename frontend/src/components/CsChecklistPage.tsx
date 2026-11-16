@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
   Clock,
   FileUp,
   GraduationCap,
@@ -89,6 +90,7 @@ export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUse
   const [rosters, setRosters] = useState<Roster[]>([]);
   const [selectedRoster, setSelectedRoster] = useState(initialRoster || "");
   const [checklist, setChecklist] = useState<CsChecklistPayload | null>(null);
+  const [showCourseLists, setShowCourseLists] = useState<boolean | null>(null);
   const [draftSlots, setDraftSlots] = useState<Record<string, CsChecklistSlotInput>>({});
   const checklistRef = useRef<CsChecklistPayload | null>(null);
   checklistRef.current = checklist;
@@ -582,8 +584,7 @@ export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUse
             <div className="flex flex-wrap items-center gap-2">
               <GraduationCap className="h-5 w-5 text-emerald-400" />
               <h2 className="text-base font-bold text-white">
-                Interactive CS Major Checklist (
-                {checklist?.college === "engineering" ? "Engineering BS" : "Arts & Sciences BA"})
+                CS Checklist ({checklist?.college === "engineering" ? "Engineering BS" : "Arts & Sciences BA"})
               </h2>
               {saving && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-300">
@@ -592,11 +593,6 @@ export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUse
                 </span>
               )}
             </div>
-            <p className="mt-1 text-xs text-zinc-400">
-              Auto-fills from completed courses,{" "}
-              <span className="font-medium text-amber-300">currently taking</span> classes, &amp;
-              active What-If schedule. Select <span className="font-medium text-emerald-300">empty boxes</span> to search matching classes.
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -766,22 +762,23 @@ export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUse
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 font-medium text-emerald-300">
-                Done: {checklist.summary.completed_slots}
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="font-semibold text-emerald-300">
+                Done {checklist.summary.completed_slots}
               </span>
               {checklist.summary.in_progress_slots > 0 && (
-                <span className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 font-medium text-amber-200">
-                  Taking: +{checklist.summary.in_progress_slots}
+                <span className="font-semibold text-amber-200">
+                  · Taking +{checklist.summary.in_progress_slots}
                 </span>
               )}
               {checklist.summary.whatif_slots > 0 && (
-                <span className="rounded-lg border border-sky-500/35 bg-sky-500/10 px-2.5 py-1 font-medium text-sky-200">
-                  What-If: +{checklist.summary.whatif_slots}
+                <span className="font-semibold text-sky-200">
+                  · What-If +{checklist.summary.whatif_slots}
                 </span>
               )}
-              <span className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1 font-medium text-zinc-300">
-                {checklist.summary.filled_slots}/{checklist.summary.total_slots} filled ({checklist.summary.remaining_slots} empty)
+              <span className="text-zinc-400">
+                · <strong className="text-zinc-200">{checklist.summary.filled_slots}/{checklist.summary.total_slots}</strong> filled
+                {checklist.summary.remaining_slots > 0 ? ` (${checklist.summary.remaining_slots} left)` : ""}
               </span>
             </div>
           </div>
@@ -794,47 +791,80 @@ export function CsChecklistPage({ user, initialRoster, lastCatalogRefresh, onUse
         </div>
       )}
 
-      {/* Classes I've Taken & Classes Currently Taking Quick-Add Cards */}
-      {checklist && (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <CourseQuickAddCard
-            title={`Classes I've Taken (${checklist.completed_courses.length})`}
-            subtitle="Completed & AP courses that auto-fill checklist boxes & unlock prereqs."
-            icon={<ListChecks className="h-4 w-4 text-sky-400" />}
-            tone="taken"
-            roster={selectedRoster}
-            courses={checklist.completed_courses}
-            details={checklist.completed_course_details}
-            alreadyTakenSet={new Set(checklist.completed_courses)}
-            alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
-            saving={takenSaving}
-            placeholder="Type course code, title, or AP (e.g. ENGL 1100F, AP Lit)..."
-            addLabel="Add Class"
-            emptyText="No completed classes yet. Type above or use Import Transcript / Completed & Bundles."
-            onAdd={addTakenCourses}
-            onRemove={removeTakenCourse}
-          />
+      {/* Collapsible Classes I've Taken & Currently Taking Drawer */}
+      {checklist && (() => {
+        const hasAnyCourses =
+          checklist.completed_courses.length > 0 ||
+          (checklist.in_progress_courses?.length ?? 0) > 0;
+        const listsExpanded = showCourseLists ?? !hasAnyCourses;
+        return (
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={() => setShowCourseLists(!listsExpanded)}
+              aria-expanded={listsExpanded}
+              className="flex w-full items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/70 px-4 py-2.5 text-left text-xs transition hover:border-zinc-700"
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-semibold text-zinc-200">My Course Lists</span>
+                <span className="text-zinc-400">
+                  Taken: <strong className="text-sky-300">{checklist.completed_courses.length}</strong>
+                  {" · "}
+                  Currently Taking:{" "}
+                  <strong className="text-amber-300">{checklist.in_progress_courses?.length ?? 0}</strong>
+                </span>
+              </div>
+              <span className="inline-flex items-center gap-1 text-zinc-400">
+                {listsExpanded ? "Hide" : "Quick-Add / Edit"}
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${listsExpanded ? "rotate-180" : ""}`}
+                />
+              </span>
+            </button>
 
-          <CourseQuickAddCard
-            title={`Classes Currently Taking (${checklist.in_progress_courses?.length ?? 0})`}
-            subtitle="Classes enrolled right now — fills checklist boxes as Taking & satisfies prereqs."
-            icon={<Clock className="h-4 w-4 text-amber-400" />}
-            tone="taking"
-            roster={selectedRoster}
-            courses={checklist.in_progress_courses || []}
-            details={checklist.in_progress_course_details}
-            alreadyTakenSet={new Set(checklist.completed_courses)}
-            alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
-            saving={takingSaving}
-            placeholder="Type course taking right now (e.g. CS 5306, CS 4820)..."
-            addLabel="Add Taking"
-            emptyText="No currently taking classes yet. Add this semester's classes or import transcript."
-            onAdd={addTakingCourses}
-            onRemove={removeTakingCourse}
-            onPromoteToTaken={promoteTakingToTaken}
-          />
-        </div>
-      )}
+            {listsExpanded && (
+              <div className="grid gap-4 lg:grid-cols-2">
+                <CourseQuickAddCard
+                  title={`Classes I've Taken (${checklist.completed_courses.length})`}
+                  subtitle="Completed & AP courses that auto-fill checklist boxes & unlock prereqs."
+                  icon={<ListChecks className="h-4 w-4 text-sky-400" />}
+                  tone="taken"
+                  roster={selectedRoster}
+                  courses={checklist.completed_courses}
+                  details={checklist.completed_course_details}
+                  alreadyTakenSet={new Set(checklist.completed_courses)}
+                  alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
+                  saving={takenSaving}
+                  placeholder="Type course code, title, or AP (e.g. ENGL 1100F, AP Lit)..."
+                  addLabel="Add Class"
+                  emptyText="No completed classes yet. Type above or use Import Transcript / Completed & Bundles."
+                  onAdd={addTakenCourses}
+                  onRemove={removeTakenCourse}
+                />
+
+                <CourseQuickAddCard
+                  title={`Classes Currently Taking (${checklist.in_progress_courses?.length ?? 0})`}
+                  subtitle="Classes enrolled right now — fills checklist boxes as Taking & satisfies prereqs."
+                  icon={<Clock className="h-4 w-4 text-amber-400" />}
+                  tone="taking"
+                  roster={selectedRoster}
+                  courses={checklist.in_progress_courses || []}
+                  details={checklist.in_progress_course_details}
+                  alreadyTakenSet={new Set(checklist.completed_courses)}
+                  alreadyTakingSet={new Set(checklist.in_progress_courses || [])}
+                  saving={takingSaving}
+                  placeholder="Type course taking right now (e.g. CS 5306, CS 4820)..."
+                  addLabel="Add Taking"
+                  emptyText="No currently taking classes yet. Add this semester's classes or import transcript."
+                  onAdd={addTakingCourses}
+                  onRemove={removeTakingCourse}
+                  onPromoteToTaken={promoteTakingToTaken}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Multi-Select Empty Box Search Action Bar */}
       {selectedSlots.length > 0 && (

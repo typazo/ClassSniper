@@ -557,9 +557,9 @@ export function SchedulerToolbar({
             </button>
           ) : (
             displayedCourses.length > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-300">
-                <Check className="h-3 w-3" />
-                No Conflicts
+              <span className="inline-flex items-center gap-1 text-emerald-400/90">
+                <Check className="h-3.5 w-3.5" />
+                No conflicts
               </span>
             )
           )}

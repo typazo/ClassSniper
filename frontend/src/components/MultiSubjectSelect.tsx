@@ -162,27 +162,6 @@ export function MultiSubjectSelect({
         </span>
       </button>
 
-      {selected.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {selected.map((code) => (
-            <span
-              key={code}
-              className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] font-medium text-emerald-300"
-            >
-              {code}
-              <button
-                type="button"
-                aria-label={`Remove ${code}`}
-                onClick={() => toggleSubject(code)}
-                className="rounded hover:bg-emerald-500/20 hover:text-white"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
       {open && (
         <div className="absolute left-0 top-full z-40 mt-1.5 w-full min-w-[290px] overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 shadow-2xl">
           {/* Quick Presets */}
